@@ -7,7 +7,7 @@
 
 class DRV8833 {
     public:
-        void init(int pin_fwd , int pin_rev, int frequency = 1000, int resolution = 10) {
+        void init(int pin_fwd , int pin_rev, int frequency = 30000, int resolution = 10) {
             this->pin_fwd = pin_fwd;
             this->pin_rev = pin_rev;
             this->frequency = frequency;
@@ -24,6 +24,7 @@ class DRV8833 {
             pinMode(pin_fwd, OUTPUT);
             pinMode(pin_rev, OUTPUT);
             rate = clamp(rate, -1.0f, 1.0f);
+            Serial.printf("rate: %0.4f %d\n", rate, fast_decay);
 
             if (rate > 0.0) {
                 forward(rate, fast_decay);
@@ -57,14 +58,26 @@ class DRV8833 {
 
         void forward(float rate, bool fast_decay = true) {
             int range = 1 << resolution;
-            analogWrite(pin_fwd, rate*range);
-            digitalWrite(pin_rev, fast_decay ? 1 : 0);
+            if(fast_decay) {
+                analogWrite(pin_rev, rate*range);
+                digitalWrite(pin_fwd, 0);
+            } else {
+                digitalWrite(pin_rev, 1);
+                analogWrite(pin_fwd, (1-rate)*range);
+            }
+
+
         }
 
         void reverse(float rate, bool fast_decay = true) {
             int range = 1 << resolution;
-            analogWrite(pin_rev, rate*range);
-            digitalWrite(pin_fwd, fast_decay ? 1 : 0);
+            if(fast_decay) {
+                analogWrite(pin_fwd, rate*range);
+                digitalWrite(pin_rev, 0);
+            } else {
+                digitalWrite(pin_fwd, 1);
+                analogWrite(pin_rev, (1-rate)*range);
+            }
         }
 
 };

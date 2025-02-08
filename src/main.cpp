@@ -90,9 +90,10 @@ void cycle_motors() {
   static bool accelerate = true;
   static double rate = 0.0;
   auto static last_execute_ms = 0;
+  auto static fast_decay = true;
   if (last_execute_ms > 0) {
     // time from full forward, to full reverse and back
-    const double cycle_time_ms = 5000;
+    const double cycle_time_ms =  10000;
     double elapsed_ms = loop_time_ms - last_execute_ms;
     double delta = 4.0 * elapsed_ms / cycle_time_ms;
     // Serial.printf("elapsed ms: %0.4f delta: %0.4f rate: %0.4f\n",elapsed_ms, delta, rate);
@@ -106,12 +107,14 @@ void cycle_motors() {
       rate -= delta;
       if(rate <= -1.0) {
         accelerate = true;
+        fast_decay = !fast_decay;
         // Serial.write("accelerating\n");
       }
     }
     // Serial.printf("post delta: %0.4f rate: %0.4f\n", delta, rate);
   }
-  left_motor.go(rate);
+  left_motor.go(rate,  fast_decay);
+  right_motor.go(rate, fast_decay);
 
   last_execute_ms = loop_time_ms;
 }
@@ -125,7 +128,5 @@ void loop() {
     cycle_motors();
   }
 
-  if (every_n_ms(last_loop_time_ms, loop_time_ms, 1)) {
-    digitalWrite(pin_test, loop_time_ms % 2);
-  }
+  digitalWrite(pin_test, !digitalRead(pin_test));
 }
