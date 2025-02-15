@@ -8,6 +8,15 @@
 #include "quadrature_encoder.h"
 #include <QMC5883LCompass.h>
 
+// hard code some interesting gps locations
+class lat_lon {
+public:
+  float lat;
+  float lon;
+};
+
+lat_lon sidewalk_in_front_of_driveway = {33.802051, -118.123404};
+
 
 //////////////////////////////////
 // pin assignments
@@ -56,6 +65,9 @@ int rx_aux = 0;
 // set up crsf serial to use pin_csrf_rx and pin_csrf_tx
 CRSFforArduino crsf = CRSFforArduino(&crsf_serial);
 
+//////////////////////////////////
+// Interrupt handlers
+
 void left_a_changed() {
   left_encoder.sensor_a_changed();
 }
@@ -69,70 +81,22 @@ void right_b_changed() {
   right_encoder.sensor_b_changed();
 }
 
-void setup() {
-  Serial.begin(115200);
-  Wire.setPins(pin_compass_sda, pin_compass_scl);
-  Wire.begin();
+void handle_crsf_message(serialReceiverLayer::rcChannels_t * rc_channels) {
+  const int axis_count = 15;
+  static float axes[axis_count];
 
-  Serial.write("tank-train\n");
-  crsf_serial.begin(420000, SERIAL_8N1, pin_csrf_rx, pin_csrf_tx);
-  gps_serial.begin(115200, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
-  compass.init();
+  if(rc_channels->failsafe ){
+    rx_str = 0;
+    rx_esc = 0;
+    rx_aux = 0;
 
-  // quadrature encoders
-  attachInterrupt(digitalPinToInterrupt(pin_left_encoder_a), left_a_changed, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(pin_left_encoder_b), left_b_changed, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(pin_right_encoder_a), right_a_changed, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(pin_right_encoder_b), right_b_changed, CHANGE);
-
-
-  if (has_mpu) {
-      if (!mpu.begin()) {
-      Serial.write("failed to connect to mpu\n");
-    }
-  Serial.write("mpu connected\n");
- }
-
-  // CRSF
-
-  // Initialize CRSF
-  if (!crsf.begin())
-  {
-    // TODO: report setup errors some better way, maybe blink LED
-      while (1)
-      {
-         Serial.println("CRSF for Arduino initialization failed!");
-         delay(1000);
-      }
-  }
-
-  crsf.setRcChannelsCallback([](serialReceiverLayer::rcChannels_t * rc_channels) {
-    const int axis_count = 15;
-    static float axes[axis_count];
-
-    if(rc_channels->failsafe ){
-      rx_str = 0;
-      rx_esc = 0;
-      rx_aux = 0;
-
-    } else {
-      rx_str = crsf.getChannel(1);
-      rx_esc = crsf.getChannel(2);
-      rx_aux = crsf.getChannel(3);
-    }
-  });
-
-
- 
-  left_motor.init(pin_left_fwd, pin_left_rev);
-  right_motor.init(pin_right_fwd, pin_right_rev);
-  pinMode(pin_test, OUTPUT);
-  pinMode(pin_built_in_led, OUTPUT);
-
-  if (has_mpu) { 
-    setup_mpu();
+  } else {
+    rx_str = crsf.getChannel(1);
+    rx_esc = crsf.getChannel(2);
+    rx_aux = crsf.getChannel(3);
   }
 }
+
 
 void setup_mpu()
 {
@@ -230,6 +194,146 @@ void display_gps_info() {
   Serial.println();
 }
 
+// sets motor speeds to go to a lat/lon
+void go_toward_lat_lon(lat_lon destination) {
+  // get current location
+  // if (!gps.location.isValid()) {
+  //   Serial.println("gps location is invalid");
+  //   // left_motor.go(0);
+  //   // right_motor.go(0);
+  //   return;
+  // }
+
+  double desired_bearing_degrees = gps.courseTo(gps.location.lat(), gps.location.lng(), destination.lat, destination.lon);
+  double distance_remaining = gps.distanceBetween(gps.location.lat(), gps.location.lng(), destination.lat, destination.lon);
+  double current_heading_degrees = compass.getAzimuth();
+
+  double heading_error = desired_bearing_degrees - current_heading_degrees;
+  while (heading_error > 180) {
+    heading_error -= 360;
+  }
+  while (heading_error < -180) {
+    heading_error += 360;
+  }
+
+  Serial.printf("desired_bearing_degrees: %0.4f current_heading_degrees: %0.4f heading_error: %0.4f\n",
+    desired_bearing_degrees,
+    current_heading_degrees,
+    heading_error);
+
+  // // set motor speeds
+  // left_motor.go(speed - turn_rate);
+  // right_motor.go(speed + turn_rate);
+}
+
+void update_motor_speeds()
+{
+  // stop on failsafe
+  if (rx_esc == 0 || rx_str == 0) {
+    right_motor.go(0);
+    left_motor.go(0);
+    return;
+  }
+
+  double speed = 0.0;
+  double str_speed = 0.0;
+
+  // calibration constants
+  const double min_esc = 176;
+  const double max_esc = 1810;
+  const double min_str = 176;
+  const double max_str = 1810;
+  const double esc_deadband_low = 980;
+  const double esc_deadband_high = 1000;
+  const double str_deadband_low = 980;
+  const double str_deadband_high = 1000;
+
+  if (rx_esc > esc_deadband_high) {
+    speed = (rx_esc - esc_deadband_high) / (max_esc - esc_deadband_high);
+  }
+  else if (rx_esc < esc_deadband_low) {
+    speed = (rx_esc - esc_deadband_low) / (esc_deadband_low - min_esc);
+  }
+  else {
+    speed = 0.0;
+  }
+
+  if (rx_str > str_deadband_high) {
+    str_speed = (rx_str - str_deadband_high) / (max_str - str_deadband_high);
+  }
+  else if (rx_str < str_deadband_low) {
+    str_speed = (rx_str - str_deadband_low) / (str_deadband_low - min_str);
+  }
+  else {
+    str_speed = 0.0;
+  }
+
+  if (abs(speed) + abs(str_speed) > 1.0) {
+    double scale = 1.0 / (abs(speed) + abs(str_speed));
+    speed *= scale;
+    str_speed *= scale;
+  }
+
+  float right_speed = speed + str_speed;
+  float left_speed = speed - str_speed;
+
+  // Serial.printf("speed: %0.4f str_speed: %0.4f left_speed: %0.4f right_speed: %0.4f\n",
+  //   speed,
+  //   str_speed,
+  //   left_speed,
+  //   right_speed);
+
+  right_motor.go(right_speed, false);
+  left_motor.go(left_speed, false);
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.setPins(pin_compass_sda, pin_compass_scl);
+  Wire.begin();
+
+  Serial.write("tank-train\n");
+  crsf_serial.begin(420000, SERIAL_8N1, pin_csrf_rx, pin_csrf_tx);
+  gps_serial.begin(115200, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
+  compass.init();
+  // compass.setCalibration(-1278, 1184, -62, 1360, 0, -4643);
+  // compass.setCalibrationOffsets(0, 0, 0);
+  // compass.clearCalibration();
+  compass.setCalibration(-2032, 522, -2360, -715, -1083, 1382);
+  // see https://www.magnetic-declination.com/
+  compass.setMagneticDeclination(11, 24);
+
+  // quadrature encoders
+  attachInterrupt(digitalPinToInterrupt(pin_left_encoder_a), left_a_changed, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(pin_left_encoder_b), left_b_changed, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(pin_right_encoder_a), right_a_changed, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(pin_right_encoder_b), right_b_changed, CHANGE);
+
+  // mpu
+  if (has_mpu) {
+      if (!mpu.begin()) {
+      Serial.write("failed to connect to mpu\n");
+    }
+    Serial.write("mpu connected\n");
+    setup_mpu();
+  }
+
+  // crsf
+  if (!crsf.begin()) {
+    while (true){
+        Serial.println("CRSF for Arduino initialization failed!");
+        delay(1000);
+    }
+  }
+
+  crsf.setRcChannelsCallback(handle_crsf_message);
+ 
+  left_motor.init(pin_left_fwd, pin_left_rev);
+  right_motor.init(pin_right_fwd, pin_right_rev);
+  pinMode(pin_test, OUTPUT);
+  pinMode(pin_built_in_led, OUTPUT);
+}
+
 void loop() {
   last_loop_time_ms = loop_time_ms;
   loop_time_ms = millis();
@@ -238,10 +342,32 @@ void loop() {
     gps.encode(gps_serial.read());
   }
 
-
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
     compass.read();
-    Serial.printf("compass: %d [%d, %d, %d]\n", compass.getAzimuth(), compass.getX(), compass.getY(), compass.getZ());
+
+    static int min_x = std::numeric_limits<int>::max();
+    static int min_y = std::numeric_limits<int>::max();
+    static int min_z = std::numeric_limits<int>::max();
+    static int max_x = std::numeric_limits<int>::min();
+    static int max_y = std::numeric_limits<int>::min();
+    static int max_z = std::numeric_limits<int>::min();
+
+    int x = compass.getX();
+    int y = compass.getY();
+    int z = compass.getZ();
+
+    if (x < min_x) min_x = x;
+    if (y < min_y) min_y = y;
+    if (z < min_z) min_z = z;
+    if (x > max_x) max_x = x;
+    if (y > max_y) max_y = y;
+    if (z > max_z) max_z = z;
+
+    // Serial.printf("compass: %d [%d, %d, %d] limits (%d, %d, %d, %d %d %d)\n", 
+    //   compass.getAzimuth(), 
+    //   compass.getX(), compass.getY(), compass.getZ(),
+    //   min_x, max_x, min_y, max_y, min_z, max_z
+    // );
   }
 
   // blink for a few ms every second to show signs of life
@@ -252,49 +378,8 @@ void loop() {
   }
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 10)) {
-    // cycle_motors();
-    
-    double speed = 0.0;
-    double str_speed = 0.0;
-
-    // 0 means bad data
-    if(rx_esc > 0) { 
-      if(rx_esc > 1000) {
-        speed = (rx_esc - 992) / (1810 - 992.);
-      }
-      else if(rx_esc < 980) {
-        speed = (rx_esc - 980) / (980 - 176.);
-      } else {
-        speed = 0.0;
-      }
-    }
-    if(rx_str > 0) {
-      if(rx_str > 1000) {
-        str_speed = (rx_str - 992) / (1810 - 992.);
-      } else if (rx_str < 980) {
-        str_speed = (rx_str - 980) / (980 - 176.);
-      } else {
-        str_speed = 0.0;
-      }
-    }
-
-    if( abs(speed) + abs(str_speed) > 1.0) {
-      double scale = 1.0 / (abs(speed) + abs(str_speed));
-      speed *= scale;
-      str_speed *= scale;
-    }
-
-    float right_speed = speed + str_speed;
-    float left_speed = speed - str_speed;
-
-    // Serial.printf("speed: %0.4f str_speed: %0.4f left_speed: %0.4f right_speed: %0.4f\n", 
-    //   speed, 
-    //   str_speed, 
-    //   left_speed, 
-    //   right_speed);
-
-    right_motor.go(right_speed, false);
-    left_motor.go(left_speed, false); 
+    update_motor_speeds();
+    go_toward_lat_lon(sidewalk_in_front_of_driveway);
   }
 
   // if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
@@ -324,3 +409,5 @@ void loop() {
 
   digitalWrite(pin_test, !digitalRead(pin_test));
 }
+
+
