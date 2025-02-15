@@ -15,6 +15,14 @@ public:
   float lon;
 };
 
+enum robot_mode_t {
+  mode_failesafe,
+  mode_manual,
+  mode_test,
+  mode_auto,
+};
+robot_mode_t robot_mode = mode_failesafe;
+
 lat_lon sidewalk_in_front_of_driveway = {33.802051, -118.123404};
 
 
@@ -196,15 +204,14 @@ void display_gps_info() {
 
 // sets motor speeds to go to a lat/lon
 void go_toward_lat_lon(lat_lon destination) {
-  // get current location
-  // if (!gps.location.isValid()) {
-  //   Serial.println("gps location is invalid");
-  //   // left_motor.go(0);
-  //   // right_motor.go(0);
-  //   return;
-  // }
+  if (!gps.location.isValid()) {
+    left_motor.go(0);
+    right_motor.go(0);
+    return;
+  }
 
-  double desired_bearing_degrees = gps.courseTo(gps.location.lat(), gps.location.lng(), destination.lat, destination.lon);
+  // subtract courseTo from 360 to get postive ccw
+  double desired_bearing_degrees = 360. - gps.courseTo(gps.location.lat(), gps.location.lng(), destination.lat, destination.lon);
   double distance_remaining = gps.distanceBetween(gps.location.lat(), gps.location.lng(), destination.lat, destination.lon);
   double current_heading_degrees = compass.getAzimuth();
 
@@ -216,12 +223,52 @@ void go_toward_lat_lon(lat_lon destination) {
     heading_error += 360;
   }
 
-  Serial.printf("desired_bearing_degrees: %0.4f current_heading_degrees: %0.4f heading_error: %0.4f\n",
-    desired_bearing_degrees,
-    current_heading_degrees,
-    heading_error);
 
-  // // set motor speeds
+  double left_motor_speed = 0.0;
+  double right_motor_speed = 0.0;
+  std::string direction;
+
+    if (heading_error < -20) {
+      // turn left
+      left_motor_speed = 0.0;
+      right_motor_speed = 1.0;
+      direction = "left";
+    } else if (heading_error > 20) {
+      // turn right
+      left_motor_speed = 1.0;
+      right_motor_speed = 0.7;
+      direction = "left";
+    } else {
+      // go straight
+      left_motor_speed = 1.0;
+      right_motor_speed = 1.0;
+      direction = "straight";
+    }
+
+    if (distance_remaining < 2.0) {
+      left_motor_speed = 0.0;
+      right_motor_speed = 0.0;
+    }
+
+    //printf("left_motor_speed: %0.4f right_motor_speed: %0.4f\n", left_motor_speed, right_motor_speed);
+    if (robot_mode == mode_auto) {
+      left_motor.go(left_motor_speed);
+      right_motor.go(right_motor_speed);
+    } else {
+      left_motor.go(0);
+      right_motor.go(0);
+    }
+
+    if (every_n_ms(last_loop_time_ms, loop_time_ms, 1000)) {
+      Serial.printf("direction: %s, distance_remaining: %0.4f, desired_bearing_degrees: %0.4f current_heading_degrees: %0.4f heading_error: %0.4f\n",
+        direction.c_str(),
+        distance_remaining,
+        desired_bearing_degrees,
+        current_heading_degrees,
+        heading_error);
+    }
+  
+    // // set motor speeds
   // left_motor.go(speed - turn_rate);
   // right_motor.go(speed + turn_rate);
 }
@@ -342,6 +389,19 @@ void loop() {
     gps.encode(gps_serial.read());
   }
 
+  // read mode from rx_aux channel
+  if (every_n_ms (last_loop_time_ms, loop_time_ms, 100)) {
+    if (rx_aux == 0) {
+      robot_mode = mode_failesafe;
+    } else if (rx_aux < 500) {
+      robot_mode = mode_manual;
+    } else if (rx_aux < 1200) {
+      robot_mode = mode_test;
+    } else {
+      robot_mode = mode_auto;
+    }
+  }
+
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
     compass.read();
 
@@ -378,8 +438,11 @@ void loop() {
   }
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 10)) {
-    update_motor_speeds();
-    go_toward_lat_lon(sidewalk_in_front_of_driveway);
+    if (robot_mode == mode_manual) {
+      update_motor_speeds();
+    } else if (robot_mode == mode_auto || robot_mode == mode_test) {
+      go_toward_lat_lon(sidewalk_in_front_of_driveway);
+    }
   }
 
   // if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
@@ -400,7 +463,10 @@ void loop() {
         gps.speed.kmph(), 
         gps.course.deg(), 
         gps.satellites.value());
+    } else {
+      crsf.telemetryWriteGPS(0, 0, 0, 0, 0, 0);
     }
+  
   }
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
