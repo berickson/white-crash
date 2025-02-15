@@ -24,7 +24,7 @@ class DRV8833 {
             pinMode(pin_fwd, OUTPUT);
             pinMode(pin_rev, OUTPUT);
             rate = clamp(rate, -1.0f, 1.0f);
-            Serial.printf("rate: %0.4f %d\n", rate, fast_decay);
+            // Serial.printf("rate: %0.4f %d\n", rate, fast_decay);
 
             if (rate > 0.0) {
                 forward(rate, fast_decay);
