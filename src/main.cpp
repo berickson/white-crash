@@ -180,39 +180,6 @@ void read_mpu() {
   }
 }
 
-void cycle_motors() {
-  static bool accelerate = true;
-  static double rate = 0.0;
-  auto static last_execute_ms = 0;
-  auto static fast_decay = true;
-  if (last_execute_ms > 0) {
-    // time from full forward, to full reverse and back
-    const double cycle_time_ms =  10000;
-    double elapsed_ms = loop_time_ms - last_execute_ms;
-    double delta = 4.0 * elapsed_ms / cycle_time_ms;
-    // Serial.printf("elapsed ms: %0.4f delta: %0.4f rate: %0.4f\n",elapsed_ms, delta, rate);
-    if(accelerate) {
-      rate += delta;
-      if(rate >= 1.0) {
-        accelerate = false;
-        // Serial.write("decelerating\n");
-      }
-    } else {
-      rate -= delta;
-      if(rate <= -1.0) {
-        accelerate = true;
-        fast_decay = !fast_decay;
-        // Serial.write("accelerating\n");
-      }
-    }
-    // Serial.printf("post delta: %0.4f rate: %0.4f\n", delta, rate);
-  }
-  left_motor.go(rate,  fast_decay);
-  right_motor.go(rate, fast_decay);
-
-  last_execute_ms = loop_time_ms;
-}
-
 void display_gps_info() {
   Serial.print(F("Location: ")); 
   if (gps.location.isValid())
@@ -264,27 +231,24 @@ void display_gps_info() {
 }
 
 void loop() {
-  bool gps_ready = false;
   last_loop_time_ms = loop_time_ms;
   loop_time_ms = millis();
   if (has_mpu) read_mpu();
   while (gps_serial.available()) {
-      if(gps.encode(gps_serial.read())) {
-        gps_ready = true;
-      }
+    gps.encode(gps_serial.read());
   }
-  if (every_n_ms(last_loop_time_ms, loop_time_ms, 1000)) {
-    display_gps_info();
-    gps_ready = false;
-  } 
+
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
     compass.read();
     Serial.printf("compass: %d [%d, %d, %d]\n", compass.getAzimuth(), compass.getX(), compass.getY(), compass.getZ());
   }
 
-  if (every_n_ms(last_loop_time_ms, loop_time_ms, 250)) {
-    digitalWrite(pin_built_in_led, !digitalRead(pin_built_in_led));
+  // blink for a few ms every second to show signs of life
+  if (millis() % 1000 < 2) {
+    digitalWrite(pin_built_in_led, HIGH);
+  } else {
+    digitalWrite(pin_built_in_led, LOW);
   }
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 10)) {
@@ -294,7 +258,7 @@ void loop() {
     double str_speed = 0.0;
 
     // 0 means bad data
-    if(rx_esc > 0) {
+    if(rx_esc > 0) { 
       if(rx_esc > 1000) {
         speed = (rx_esc - 992) / (1810 - 992.);
       }
@@ -331,24 +295,27 @@ void loop() {
 
     right_motor.go(right_speed, false);
     left_motor.go(left_speed, false); 
-    
-   // right_motor.go(1.0, false); 
   }
 
-  if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
-    Serial.printf("esc: %d str: %d left_odo: %d  right_odo: %d\n",rx_esc, rx_str, left_encoder.odometer_a, right_encoder.odometer_a);
-  }
+  // if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
+  //   Serial.printf("esc: %d str: %d left_odo: %d  right_odo: %d\n",rx_esc, rx_str, left_encoder.odometer_a, right_encoder.odometer_a);
+  // }
 
   crsf.update(); // update as fast as possible, will call callbacks when data is ready
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 200))
   {
     crsf.telemetryWriteBattery(1200, 10, 300, 71);
     crsf.telemetryWriteCustomFlightMode("TANK", false);
+    crsf.telemetryWriteAttitude(0, 0, compass.getAzimuth()*10);
     if(gps.location.isValid()) {
-      crsf.telemetryWriteGPS(gps.location.lat(), gps.location.lng(), gps.altitude.meters(), gps.speed.kmph(), gps.course.deg(), gps.satellites.value());
+      crsf.telemetryWriteGPS(
+        gps.location.lat(), 
+        gps.location.lng(), 
+        gps.altitude.meters(), 
+        gps.speed.kmph(), 
+        gps.course.deg(), 
+        gps.satellites.value());
     }
-    //crsf.telemetryWriteFlightMode(serialReceiverLayer::FLIGHT_MODE_ACRO);
-    // crsf.telemetryWriteCustomFlightMode("TANK", false);
   }
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
