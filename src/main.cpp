@@ -10,69 +10,15 @@
 #include <vector>
 #include "Fsm.h"
 
-class ManuallMode : public Task {
-  public:
-  ManuallMode() {
-    name = "manual";
-  }
-
-  // implement the execute method
-  virtual void execute() override{
-    Serial.println("manual mode\n");
-  }
-
-} manual_mode;
-
-class AutoMode : public Task {
-  public:
-  AutoMode() {
-    name = "auto";
-  }
-  void execute() override {
-    Serial.write("auto mode\n");
-  }
-} auto_mode;
-
-class FailsafeMode : public Task {
-  public:
-  FailsafeMode() {
-    name = "failsafe";
-  }
-  void execute() override {
-    Serial.write("failsafe mode\n");
-  }
-} failsafe_mode;
-
-std::vector<Task *> tasks = {
-  &manual_mode,
-  &auto_mode,
-  &failsafe_mode,
-};
-
-std::vector<Fsm::Edge> edges = {
-  Fsm::Edge("failsafe", "manual", "manual"),
-  Fsm::Edge("manual", "auto", "auto"),
-  Fsm::Edge("auto", "done", "manual"),
-  Fsm::Edge("manual", "failsafe", "failsafe"),
-};
-
-Fsm fsm(tasks, edges);
-
 
 // hard code some interesting gps locations
 class lat_lon {
 public:
-  float lat;
-  float lon;
+  double lat;
+  double lon;
 };
 
-enum robot_mode_t {
-  mode_failesafe,
-  mode_manual,
-  mode_test,
-  mode_auto,
-};
-robot_mode_t robot_mode = mode_failesafe;
+
 
 lat_lon sidewalk_in_front_of_driveway = {33.802051, -118.123404};
 lat_lon sidewalk_by_jimbos_house = {33.802057, -118.123248};
@@ -260,16 +206,23 @@ void display_gps_info() {
 }
 
 // sets motor speeds to go to a lat/lon
-void go_toward_lat_lon(lat_lon destination) {
+// returns true if arrived
+bool go_toward_lat_lon(lat_lon destination) {
   if (!gps.location.isValid()) {
     left_motor.go(0);
     right_motor.go(0);
-    return;
+    return false;
+  }
+
+  double distance_remaining = gps.distanceBetween(gps.location.lat(), gps.location.lng(), destination.lat, destination.lon);
+  if (distance_remaining < 2.0) {
+    left_motor.go(0);
+    right_motor.go(0);
+    return true;
   }
 
   // subtract courseTo from 360 to get postive ccw
   double desired_bearing_degrees = 360. - gps.courseTo(gps.location.lat(), gps.location.lng(), destination.lat, destination.lon);
-  double distance_remaining = gps.distanceBetween(gps.location.lat(), gps.location.lng(), destination.lat, destination.lon);
   double current_heading_degrees = compass.getAzimuth();
 
   double heading_error = desired_bearing_degrees - current_heading_degrees;
@@ -302,28 +255,22 @@ void go_toward_lat_lon(lat_lon destination) {
       direction = "straight";
     }
 
-    if (distance_remaining < 2.0) {
-      left_motor_speed = 0.0;
-      right_motor_speed = 0.0;
-    }
 
     //printf("left_motor_speed: %0.4f right_motor_speed: %0.4f\n", left_motor_speed, right_motor_speed);
-    if (robot_mode == mode_auto) {
-      left_motor.go(left_motor_speed);
-      right_motor.go(right_motor_speed);
-    } else {
-      left_motor.go(0);
-      right_motor.go(0);
-    }
+    left_motor.go(left_motor_speed);
+    right_motor.go(right_motor_speed);
 
     if (every_n_ms(last_loop_time_ms, loop_time_ms, 1000)) {
-      Serial.printf("direction: %s, distance_remaining: %0.4f, desired_bearing_degrees: %0.4f current_heading_degrees: %0.4f heading_error: %0.4f\n",
+      Serial.printf("destination: %f %f direction: %s, distance_remaining: %0.4f, desired_bearing_degrees: %0.4f current_heading_degrees: %0.4f heading_error: %0.4f\n",
+        destination.lat,
+        destination.lon,
         direction.c_str(),
         distance_remaining,
         desired_bearing_degrees,
         current_heading_degrees,
         heading_error);
     }
+    return false;
 }
 
 void update_motor_speeds()
@@ -386,6 +333,94 @@ void update_motor_speeds()
   right_motor.go(right_speed, false);
   left_motor.go(left_speed, false);
 }
+
+//////////////////////////////////
+// Finite state machine
+class HandMode : public Task {
+  public:
+  HandMode() {
+    name = "hand";
+  }
+
+  // implement the execute method
+  virtual void execute() override{
+    update_motor_speeds();
+  }
+
+} hand_mode;
+
+class OffMode : public Task {
+  public:
+  OffMode() {
+    name = "off";
+  }
+
+  // implement the execute method
+  virtual void execute() override{
+    left_motor.go(0);
+    right_motor.go(0);
+  }
+
+} off_mode;
+
+class AutoMode : public Task {
+  public:
+  AutoMode() {
+    name = "auto";
+  }
+  int step = 0;
+
+  void begin() override {
+    step = 0;
+  }
+
+  void execute() override {
+    bool arrived = go_toward_lat_lon(route_waypoints[step]);
+    if (arrived) {
+      Serial.printf("arrived at waypoint %d ", step);
+      step++;
+      if (step >= route_waypoints.size()) {
+        done = true;
+        Serial.write(", done with route\n");
+      } else {
+        Serial.printf("going to waypoint %d\n", step);
+      }
+    }
+  }
+} auto_mode;
+
+class FailsafeMode : public Task {
+  public:
+  FailsafeMode() {
+    name = "failsafe";
+  }
+  void execute() override {
+    Serial.write("failsafe mode\n");
+    left_motor.go(0);
+    right_motor.go(0);
+  }
+} failsafe_mode;
+
+std::vector<Task *> tasks = {
+  &hand_mode,
+  &off_mode,
+  &auto_mode,
+  &failsafe_mode,
+};
+
+std::vector<Fsm::Edge> edges = {
+  // from, event, to
+  Fsm::Edge("auto", "done", "hand"),
+  Fsm::Edge("*", "auto", "auto"),
+  Fsm::Edge("*", "failsafe", "failsafe"),
+  Fsm::Edge("*", "hand", "hand"),
+  Fsm::Edge("*", "off", "off"),
+};
+
+Fsm fsm(tasks, edges);
+
+//////////////////////////////////
+// Main setup and loop
 
 void setup() {
   Serial.begin(115200);
@@ -452,18 +487,42 @@ void loop() {
   }
 
   // read mode from rx_aux channel
-  if (every_n_ms (last_loop_time_ms, loop_time_ms, 100)) {
+  enum aux_mode_t {aux_mode_failsafe, aux_mode_hand, aux_mode_off, aux_mode_auto};
+
+
+  if (every_10_ms) {
+    static aux_mode_t last_aux_mode = aux_mode_failsafe;
+    aux_mode_t aux_mode;
     if (rx_aux == 0) {
-      fsm.set_event("failsafe");
-      robot_mode = mode_failesafe;
+      aux_mode = aux_mode_failsafe;
     } else if (rx_aux < 500) {
-      fsm.set_event("manual");
-      robot_mode = mode_manual;
+      aux_mode = aux_mode_hand;
+    } else if (rx_aux < 1200) { 
+      aux_mode = aux_mode_off;
     } else {
-      fsm.set_event("auto");
-      robot_mode = mode_auto;
+      aux_mode = aux_mode_auto;
     }
+    if (aux_mode != last_aux_mode) {
+      switch (aux_mode) {
+        case aux_mode_failsafe:
+          fsm.set_event("failsafe");
+          break;
+        case aux_mode_hand:
+          fsm.set_event("hand");
+          break;
+        case aux_mode_off:
+          fsm.set_event("off");
+          break;
+        case aux_mode_auto:
+          fsm.set_event("auto");
+          break;
+        default:
+          fsm.set_event("failsafe");
+      }
+    }
+    last_aux_mode = aux_mode;
   }
+  
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
     compass.read();
@@ -501,14 +560,6 @@ void loop() {
     digitalWrite(pin_built_in_led, LOW);
   }
 
-  if (every_n_ms(last_loop_time_ms, loop_time_ms, 10)) {
-    if (robot_mode == mode_manual) {
-      update_motor_speeds();
-    } else if (robot_mode == mode_auto || robot_mode == mode_test) {
-      go_toward_lat_lon(sidewalk_in_front_of_driveway);
-    }
-  }
-
   // if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
   //   Serial.printf("esc: %d str: %d left_odo: %d  right_odo: %d\n",rx_esc, rx_str, left_encoder.odometer_a, right_encoder.odometer_a);
   // }
@@ -517,7 +568,7 @@ void loop() {
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 200))
   {
     crsf.telemetryWriteBattery(1200, 10, 300, 71);
-    crsf.telemetryWriteCustomFlightMode("TANK", false);
+    crsf.telemetryWriteCustomFlightMode(fsm.current_task->name, false);
     crsf.telemetryWriteAttitude(0, 0, compass.getAzimuth()*10);
     if(gps.location.isValid()) {
       crsf.telemetryWriteGPS(
@@ -534,7 +585,7 @@ void loop() {
   }
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
-    //Serial.printf("str: %d esc: %d aux: %d\n", rx_str, rx_esc, rx_aux);
+    Serial.printf("mode: %s str: %d esc: %d aux: %d\n", fsm.current_task->name, rx_str, rx_esc, rx_aux);
   }
 
   digitalWrite(pin_test, !digitalRead(pin_test));

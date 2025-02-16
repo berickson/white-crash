@@ -37,6 +37,9 @@ void Fsm::execute() {
 }
 
 void Fsm::set_current_task(const char * name) {
+  if( equals(name, current_task->name) ) {
+    return;
+  }
   Serial.print("Switching to task ");
   Serial.println(name);
   
@@ -48,7 +51,7 @@ void Fsm::set_current_task(const char * name) {
 
   
   for(auto & task : tasks) {
-    if(equals(task->name,name) && task != current_task){
+    if(equals(task->name,name)){
       current_task->end();
       current_task = task;
       current_task->begin();
@@ -72,7 +75,12 @@ bool Fsm::is_done() {
 void Fsm::set_event(const char * event) {
   // move based on event
   for (auto edge : edges) {
-    if(equals( edge.from, current_task->name ) && equals( edge.event, event )) {
+    // asterisk matches all tasks, only switch if not already in the to state
+    if(equals(edge.from, "*") && equals(edge.event, event) && !equals(edge.to, current_task->name)) {
+      set_current_task(edge.to);
+      break;
+    }
+    else if(equals( edge.from, current_task->name ) && equals( edge.event, event )) {
       set_current_task(edge.to);
       break;
     }
