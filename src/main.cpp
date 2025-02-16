@@ -7,6 +7,7 @@
 #include "TinyGPS++.h"
 #include "quadrature_encoder.h"
 #include <QMC5883LCompass.h>
+#include <vector>
 
 // hard code some interesting gps locations
 class lat_lon {
@@ -24,6 +25,12 @@ enum robot_mode_t {
 robot_mode_t robot_mode = mode_failesafe;
 
 lat_lon sidewalk_in_front_of_driveway = {33.802051, -118.123404};
+lat_lon sidewalk_by_jimbos_house = {33.802057, -118.123248};
+
+std::vector<lat_lon> route_waypoints = {
+  sidewalk_by_jimbos_house,
+  sidewalk_in_front_of_driveway,
+};
 
 
 //////////////////////////////////
@@ -267,10 +274,6 @@ void go_toward_lat_lon(lat_lon destination) {
         current_heading_degrees,
         heading_error);
     }
-  
-    // // set motor speeds
-  // left_motor.go(speed - turn_rate);
-  // right_motor.go(speed + turn_rate);
 }
 
 void update_motor_speeds()
@@ -405,6 +408,7 @@ void loop() {
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
     compass.read();
 
+    // update magnetometer limits
     static int min_x = std::numeric_limits<int>::max();
     static int min_y = std::numeric_limits<int>::max();
     static int min_z = std::numeric_limits<int>::max();
