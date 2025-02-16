@@ -8,6 +8,56 @@
 #include "quadrature_encoder.h"
 #include <QMC5883LCompass.h>
 #include <vector>
+#include "Fsm.h"
+
+class ManuallMode : public Task {
+  public:
+  ManuallMode() {
+    name = "manual";
+  }
+
+  // implement the execute method
+  virtual void execute() override{
+    Serial.println("manual mode\n");
+  }
+
+} manual_mode;
+
+class AutoMode : public Task {
+  public:
+  AutoMode() {
+    name = "auto";
+  }
+  void execute() override {
+    Serial.write("auto mode\n");
+  }
+} auto_mode;
+
+class FailsafeMode : public Task {
+  public:
+  FailsafeMode() {
+    name = "failsafe";
+  }
+  void execute() override {
+    Serial.write("failsafe mode\n");
+  }
+} failsafe_mode;
+
+std::vector<Task *> tasks = {
+  &manual_mode,
+  &auto_mode,
+  &failsafe_mode,
+};
+
+std::vector<Fsm::Edge> edges = {
+  Fsm::Edge("failsafe", "manual", "manual"),
+  Fsm::Edge("manual", "auto", "auto"),
+  Fsm::Edge("auto", "done", "manual"),
+  Fsm::Edge("manual", "failsafe", "failsafe"),
+};
+
+Fsm fsm(tasks, edges);
+
 
 // hard code some interesting gps locations
 class lat_lon {
@@ -342,6 +392,8 @@ void setup() {
   Wire.setPins(pin_compass_sda, pin_compass_scl);
   Wire.begin();
 
+  fsm.begin();
+
   Serial.write("tank-train\n");
   crsf_serial.begin(420000, SERIAL_8N1, pin_csrf_rx, pin_csrf_tx);
   gps_serial.begin(115200, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
@@ -392,15 +444,23 @@ void loop() {
     gps.encode(gps_serial.read());
   }
 
+  bool every_10_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 10);
+  bool every_100_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 100);
+
+  if (every_100_ms) {
+    fsm.execute();
+  }
+
   // read mode from rx_aux channel
   if (every_n_ms (last_loop_time_ms, loop_time_ms, 100)) {
     if (rx_aux == 0) {
+      fsm.set_event("failsafe");
       robot_mode = mode_failesafe;
     } else if (rx_aux < 500) {
+      fsm.set_event("manual");
       robot_mode = mode_manual;
-    } else if (rx_aux < 1200) {
-      robot_mode = mode_test;
     } else {
+      fsm.set_event("auto");
       robot_mode = mode_auto;
     }
   }
@@ -435,7 +495,7 @@ void loop() {
   }
 
   // blink for a few ms every second to show signs of life
-  if (millis() % 1000 < 2) {
+  if (millis() % 1000 < 5) {
     digitalWrite(pin_built_in_led, HIGH);
   } else {
     digitalWrite(pin_built_in_led, LOW);

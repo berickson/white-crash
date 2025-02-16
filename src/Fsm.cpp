@@ -14,11 +14,9 @@ Fsm::Edge::Edge(const char * _from, const char * _event, const char * _to) {
   to = _to;
 }
 
-Fsm::Fsm(Task ** _tasks, int _task_count, Edge * _edges, int _edge_count) {
+Fsm::Fsm(std::vector<Task*> _tasks, std::vector<Edge> _edges) {
   tasks = _tasks;
-  task_count = _task_count;
   edges = _edges;
-  edge_count = _edge_count;
   name="fsm";
 }
 
@@ -47,8 +45,9 @@ void Fsm::set_current_task(const char * name) {
     current_task = this;
     return;
   }
-  for(int i = 0; i < task_count; i++) {
-    Task * task = tasks[i];
+
+  
+  for(auto & task : tasks) {
     if(equals(task->name,name) && task != current_task){
       current_task->end();
       current_task = task;
@@ -72,9 +71,9 @@ bool Fsm::is_done() {
 
 void Fsm::set_event(const char * event) {
   // move based on event
-  for(int i = 0; i < edge_count; i++) {
-    if(equals( edges[i].from, current_task->name ) && equals( edges[i].event, event )) {
-      set_current_task(edges[i].to);
+  for (auto edge : edges) {
+    if(equals( edge.from, current_task->name ) && equals( edge.event, event )) {
+      set_current_task(edge.to);
       break;
     }
   }

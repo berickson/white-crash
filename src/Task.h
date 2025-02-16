@@ -6,6 +6,6 @@ public:
   bool done = false;
   virtual void begin();
   virtual void end();
-  virtual void execute();
+  virtual void execute() = 0;
   virtual bool is_done();
 };

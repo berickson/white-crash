@@ -1,6 +1,7 @@
 #pragma once
 #include <stdlib.h>
 #include "Task.h"
+#include <vector>
 
 class Fsm : public Task {
   public:
@@ -11,15 +12,16 @@ class Fsm : public Task {
     const char * event = NULL;
     const char * to = NULL;
   };
-  Edge * edges = NULL;
-  int edge_count = -1;
-  Task ** tasks = NULL;
-  int task_count = -1;
+  std::vector<Edge> edges;
+  std::vector<Task*> tasks;
+
+  // current task should be an iterator into tasks
   Task * current_task = NULL;
+
   bool done = false;
   void set_current_task(const char * name);
 
-  Fsm(Task ** _tasks, int _task_count, Edge * _edges, int _edge_count);
+  Fsm(std::vector<Task*> tasks, std::vector<Edge> edges);
   void begin();
   void execute();
   bool is_done();
