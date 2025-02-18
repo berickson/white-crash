@@ -371,6 +371,8 @@ class AutoMode : public Task {
   int step = 0;
 
   void begin() override {
+    done = false;
+    Serial.write("auto mode begin\n");
     step = 0;
   }
 
@@ -387,6 +389,12 @@ class AutoMode : public Task {
       }
     }
   }
+
+  void end() override {
+    Serial.write("auto mode end\n");
+    step = 0;
+  }
+
 } auto_mode;
 
 class FailsafeMode : public Task {
@@ -543,11 +551,11 @@ void loop() {
     if (y > max_y) max_y = y;
     if (z > max_z) max_z = z;
 
-    Serial.printf("compass: %d [%d, %d, %d] limits (%d, %d, %d, %d %d %d)\n", 
-      compass.getAzimuth(), 
-      compass.getX(), compass.getY(), compass.getZ(),
-      min_x, max_x, min_y, max_y, min_z, max_z
-    );
+    // Serial.printf("compass: %d [%d, %d, %d] limits (%d, %d, %d, %d %d %d)\n", 
+    //   compass.getAzimuth(), 
+    //   compass.getX(), compass.getY(), compass.getZ(),
+    //   min_x, max_x, min_y, max_y, min_z, max_z
+    // );
   }
 
   // blink for a few ms every second to show signs of life
@@ -582,7 +590,7 @@ void loop() {
   }
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
-    Serial.printf("mode: %s str: %d esc: %d aux: %d\n", fsm.current_task->name, rx_str, rx_esc, rx_aux);
+    // Serial.printf("mode: %s str: %d esc: %d aux: %d\n", fsm.current_task->name, rx_str, rx_esc, rx_aux);
   }
 
   digitalWrite(pin_test, !digitalRead(pin_test));

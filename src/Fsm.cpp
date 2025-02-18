@@ -54,6 +54,7 @@ void Fsm::set_current_task(const char * name) {
     if(equals(task->name,name)){
       current_task->end();
       current_task = task;
+      current_task->done = false;
       current_task->begin();
       break;
     }
