@@ -433,10 +433,7 @@ void setup() {
   crsf_serial.begin(420000, SERIAL_8N1, pin_csrf_rx, pin_csrf_tx);
   gps_serial.begin(115200, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
   compass.init();
-  // compass.setCalibration(-1278, 1184, -62, 1360, 0, -4643);
-  // compass.setCalibrationOffsets(0, 0, 0);
-  // compass.clearCalibration();
-  compass.setCalibration(-2032, 522, -2360, -715, -1083, 1382);
+  compass.setCalibration(-950, 675, -1510, 47, 0, 850);
   // see https://www.magnetic-declination.com/
   compass.setMagneticDeclination(11, 24);
 
@@ -546,11 +543,11 @@ void loop() {
     if (y > max_y) max_y = y;
     if (z > max_z) max_z = z;
 
-    // Serial.printf("compass: %d [%d, %d, %d] limits (%d, %d, %d, %d %d %d)\n", 
-    //   compass.getAzimuth(), 
-    //   compass.getX(), compass.getY(), compass.getZ(),
-    //   min_x, max_x, min_y, max_y, min_z, max_z
-    // );
+    Serial.printf("compass: %d [%d, %d, %d] limits (%d, %d, %d, %d %d %d)\n", 
+      compass.getAzimuth(), 
+      compass.getX(), compass.getY(), compass.getZ(),
+      min_x, max_x, min_y, max_y, min_z, max_z
+    );
   }
 
   // blink for a few ms every second to show signs of life
