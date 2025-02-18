@@ -240,7 +240,7 @@ bool go_toward_lat_lon(lat_lon destination) {
 
     if (heading_error < -20) {
       // turn left
-      left_motor_speed = 0.0;
+      left_motor_speed = 0.7;
       right_motor_speed = 1.0;
       direction = "left";
     } else if (heading_error > 20) {
