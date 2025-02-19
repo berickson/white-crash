@@ -39,6 +39,7 @@ const int pin_right_rev = 5;
 const int pin_compass_sda = 6;
 const int pin_compass_scl = 7;
 const int pin_test = 8;
+const int pin_battery_voltage = 9;
 
 const int pin_built_in_led = 15;
 
@@ -109,7 +110,7 @@ void handle_crsf_message(serialReceiverLayer::rcChannels_t * rc_channels) {
 }
 
 
-void setup_mpu()
+void  _mpu()
 {
   // setup motion detection
   mpu.setHighPassFilter(MPU6050_HIGHPASS_0_63_HZ);
@@ -445,6 +446,7 @@ void setup() {
   // see https://www.magnetic-declination.com/
   compass.setMagneticDeclination(11, 24);
 
+
   // quadrature encoders
   attachInterrupt(digitalPinToInterrupt(pin_left_encoder_a), left_a_changed, CHANGE);
   attachInterrupt(digitalPinToInterrupt(pin_left_encoder_b), left_b_changed, CHANGE);
@@ -452,13 +454,13 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(pin_right_encoder_b), right_b_changed, CHANGE);
 
   // mpu
-  if (has_mpu) {
-      if (!mpu.begin()) {
-      Serial.write("failed to connect to mpu\n");
-    }
-    Serial.write("mpu connected\n");
-    setup_mpu();
-  }
+  // if (has_mpu) {
+  //     if (!mpu.begin()) {
+  //     Serial.write("failed to connect to mpu\n");
+  //   }
+  //   Serial.write("mpu connected\n");
+  //   setup_mpu();
+  // }
 
   // crsf
   if (!crsf.begin()) {
@@ -474,7 +476,10 @@ void setup() {
   right_motor.init(pin_right_fwd, pin_right_rev);
   pinMode(pin_test, OUTPUT);
   pinMode(pin_built_in_led, OUTPUT);
+  pinMode(pin_battery_voltage, INPUT);
 }
+
+double v_bat = NAN;
 
 void loop() {
   last_loop_time_ms = loop_time_ms;
@@ -486,6 +491,18 @@ void loop() {
 
   bool every_10_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 10);
   bool every_100_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 100);
+  bool every_1000_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 1000);
+
+  if (isnan(v_bat) || every_1000_ms) {
+    analogReadResolution(12);
+    int sum = 0;
+    for (int i = 0; i < 16; i++) {
+      sum += analogRead(pin_battery_voltage);
+    }
+    v_bat = 8.4 * sum / 36823.;
+    Serial.printf("vbat: %0.4f sum: %d\n", v_bat, sum);
+  }
+
 
   if (every_100_ms) {
     fsm.execute();
@@ -572,7 +589,7 @@ void loop() {
   crsf.update(); // update as fast as possible, will call callbacks when data is ready
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 200))
   {
-    crsf.telemetryWriteBattery(1200, 10, 300, 71);
+    crsf.telemetryWriteBattery(v_bat * 100, 0, 0, 0);
     crsf.telemetryWriteCustomFlightMode(fsm.current_task->name, false);
     crsf.telemetryWriteAttitude(0, 0, compass.getAzimuth()*10);
     if(gps.location.isValid()) {
