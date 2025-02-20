@@ -27,7 +27,7 @@ class QuadratureEncoder {
     last_odometer_a_us=micros();
     if(digitalRead(pin_sensor_a)==digitalRead(pin_sensor_b)){
       --odometer_a;
-      odometer_ab_us += last_odometer_a_us - last_odometer_b_us;
+      odometer_ab_us = last_odometer_a_us - last_odometer_b_us;
     } else {
       ++odometer_a;
     }
@@ -37,7 +37,7 @@ class QuadratureEncoder {
     last_odometer_b_us=micros();
     if(digitalRead(pin_sensor_a)==digitalRead(pin_sensor_b)){
       ++odometer_b;
-      odometer_ab_us += last_odometer_b_us - last_odometer_a_us;
+      odometer_ab_us = last_odometer_b_us - last_odometer_a_us;
     } else {
       --odometer_b;
     }

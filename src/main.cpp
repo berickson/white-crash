@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
 #include "drv8833.h"
@@ -9,6 +8,21 @@
 #include <QMC5883LCompass.h>
 #include <vector>
 #include "Fsm.h"
+
+// micro ros
+#include <micro_ros_platformio.h>
+
+
+#include <rcl/rcl.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+
+#include <std_msgs/msg/int32.h>
+#include <std_msgs/msg/string.h>
+#include <std_msgs/msg/float32.h>
+
+
+#include "secrets/wifi_login.h"
 
 
 // hard code some interesting gps locations
@@ -55,10 +69,10 @@ const int pin_csrf_tx = 40;
 static bool has_mpu = false;
 
 
+
 //////////////////////////////////
 // Globals
 
-Adafruit_MPU6050 mpu;
 DRV8833 left_motor;
 DRV8833 right_motor;
 HardwareSerial crsf_serial(0);
@@ -76,6 +90,74 @@ int rx_aux = 0;
 
 // set up crsf serial to use pin_csrf_rx and pin_csrf_tx
 CRSFforArduino crsf = CRSFforArduino(&crsf_serial);
+
+//////////////////////////////////
+// Micro Ros
+
+rcl_publisher_t log_publisher;
+rcl_publisher_t battery_publisher;
+std_msgs__msg__String log_msg;
+std_msgs__msg__Float32 battery_msg;
+
+rclc_support_t support;
+rcl_allocator_t allocator;
+rcl_node_t node;
+
+#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
+#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
+
+// logs to ros and serial
+void logf(const char * format, ...) {
+  va_list args;
+  va_start(args, format);
+  log_msg.data.size = vsnprintf(log_msg.data.data, log_msg.data.capacity, format, args);
+  // RCSOFTCHECK(rcl_publish(&log_publisher, &log_msg, NULL));
+  va_end(args);
+  Serial.write(log_msg.data.data, log_msg.data.size);
+  Serial.write("\n");
+}
+
+void error_loop(){
+ }
+
+
+
+void setup_micro_ros() {
+  Serial.printf("setting up micro ros\n");
+  IPAddress agent_ip(192,168,86,66);
+  size_t agent_port = 8888;
+  
+  char * ssid = const_cast<char *>(wifi_ssid);
+  char * psk = const_cast<char *> (wifi_password);
+  
+  set_microros_wifi_transports(ssid, psk, agent_ip, agent_port);
+  delay(2000);
+
+  allocator = rcl_get_default_allocator();
+
+  //create init_options
+  RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+
+  // create node
+  RCCHECK(rclc_node_init_default(&node, "micro_ros_arduino_wifi_node", "", &support));
+
+  // create publishers
+  
+  RCCHECK(rclc_publisher_init_best_effort(
+    &log_publisher,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+    "/tank/log"));
+
+  RCCHECK(rclc_publisher_init_best_effort(
+      &battery_publisher,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+      "/tank/battery"));
+  
+
+  Serial.printf("micro ros initialized\n");
+}
 
 //////////////////////////////////
 // Interrupt handlers
@@ -109,18 +191,6 @@ void handle_crsf_message(serialReceiverLayer::rcChannels_t * rc_channels) {
   }
 }
 
-
-void  _mpu()
-{
-  // setup motion detection
-  mpu.setHighPassFilter(MPU6050_HIGHPASS_0_63_HZ);
-  mpu.setMotionDetectionThreshold(1);
-  mpu.setMotionDetectionDuration(20);
-  mpu.setInterruptPinLatch(true); // Keep it latched.  Will turn off when reinitialized.
-  mpu.setInterruptPinPolarity(true);
-  mpu.setMotionInterrupt(true);
-}
-
 unsigned long last_loop_time_ms = 0;
 unsigned long loop_time_ms = 0;
 // returns true if loop time passes through n ms boundary
@@ -128,83 +198,7 @@ bool every_n_ms(unsigned long last_loop_ms, unsigned long loop_ms, unsigned long
   return (last_loop_ms % ms) + (loop_ms - last_loop_ms) >= ms;
 }
 
-void read_mpu() {
-  if(mpu.getMotionInterruptStatus()) {
-    /* Get new sensor events with the readings */
-    sensors_event_t a, g, temp;
-    mpu.getEvent(&a, &g, &temp);
 
-    /* Print out the values */
-    Serial.print("AccelX:");
-    Serial.print(a.acceleration.x);
-    Serial.print(",");
-    Serial.print("AccelY:");
-    Serial.print(a.acceleration.y);
-    Serial.print(",");
-    Serial.print("AccelZ:");
-    Serial.print(a.acceleration.z);
-    Serial.print(", ");
-    Serial.print("GyroX:");
-    Serial.print(g.gyro.x);
-    Serial.print(",");
-    Serial.print("GyroY:");
-    Serial.print(g.gyro.y);
-    Serial.print(",");
-    Serial.print("GyroZ:");
-    Serial.print(g.gyro.z);
-    Serial.println("");
-  }
-}
-
-void display_gps_info() {
-  Serial.print(F("Location: ")); 
-  if (gps.location.isValid())
-  {
-    Serial.print(gps.location.lat(), 6);
-    Serial.print(F(","));
-    Serial.print(gps.location.lng(), 6);
-  }
-  else
-  {
-    Serial.print(F("INVALID"));
-  }
-
-  Serial.print(F("  Date/Time: "));
-  if (gps.date.isValid())
-  {
-    Serial.print(gps.date.month());
-    Serial.print(F("/"));
-    Serial.print(gps.date.day());
-    Serial.print(F("/"));
-    Serial.print(gps.date.year());
-  }
-  else
-  {
-    Serial.print(F("INVALID"));
-  }
-
-  Serial.print(F(" "));
-  if (gps.time.isValid())
-  {
-    if (gps.time.hour() < 10) Serial.print(F("0"));
-    Serial.print(gps.time.hour());
-    Serial.print(F(":"));
-    if (gps.time.minute() < 10) Serial.print(F("0"));
-    Serial.print(gps.time.minute());
-    Serial.print(F(":"));
-    if (gps.time.second() < 10) Serial.print(F("0"));
-    Serial.print(gps.time.second());
-    Serial.print(F("."));
-    if (gps.time.centisecond() < 10) Serial.print(F("0"));
-    Serial.print(gps.time.centisecond());
-  }
-  else
-  {
-    Serial.print(F("INVALID"));
-  }
-
-  Serial.println();
-}
 
 // sets motor speeds to go to a lat/lon
 // returns true if arrived
@@ -262,7 +256,7 @@ bool go_toward_lat_lon(lat_lon destination) {
     right_motor.go(right_motor_speed);
 
     if (every_n_ms(last_loop_time_ms, loop_time_ms, 1000)) {
-      Serial.printf("destination: %f %f direction: %s, distance_remaining: %0.4f, desired_bearing_degrees: %0.4f current_heading_degrees: %0.4f heading_error: %0.4f\n",
+      logf("destination: %f %f direction: %s, distance_remaining: %0.4f, desired_bearing_degrees: %0.4f current_heading_degrees: %0.4f heading_error: %0.4f\n",
         destination.lat,
         destination.lon,
         direction.c_str(),
@@ -334,6 +328,7 @@ void update_motor_speeds()
   right_motor.go(right_speed, false);
   left_motor.go(left_speed, false);
 }
+
 
 //////////////////////////////////
 // Finite state machine
@@ -428,13 +423,30 @@ std::vector<Fsm::Edge> edges = {
 
 Fsm fsm(tasks, edges);
 
+
+void ros_thread(void * arg) {
+  while (true) {
+    // RCSOFTCHECK(rcl_publish(&battery_publisher, &battery_msg, NULL));
+    delay(1000);
+  }
+}
+
 //////////////////////////////////
 // Main setup and loop
 
+
 void setup() {
   Serial.begin(115200);
+
+
+  log_msg.data.data = (char *) malloc(200);
+  log_msg.data.capacity = 200;
+  log_msg.data.size = 0;
+  // setup_micro_ros();
+
   Wire.setPins(pin_compass_sda, pin_compass_scl);
   Wire.begin();
+  Wire.setTimeOut(5);
 
   fsm.begin();
 
@@ -447,20 +459,15 @@ void setup() {
   compass.setMagneticDeclination(11, 24);
 
 
+
   // quadrature encoders
+  
   attachInterrupt(digitalPinToInterrupt(pin_left_encoder_a), left_a_changed, CHANGE);
   attachInterrupt(digitalPinToInterrupt(pin_left_encoder_b), left_b_changed, CHANGE);
   attachInterrupt(digitalPinToInterrupt(pin_right_encoder_a), right_a_changed, CHANGE);
   attachInterrupt(digitalPinToInterrupt(pin_right_encoder_b), right_b_changed, CHANGE);
 
-  // mpu
-  // if (has_mpu) {
-  //     if (!mpu.begin()) {
-  //     Serial.write("failed to connect to mpu\n");
-  //   }
-  //   Serial.write("mpu connected\n");
-  //   setup_mpu();
-  // }
+
 
   // crsf
   if (!crsf.begin()) {
@@ -477,14 +484,57 @@ void setup() {
   pinMode(pin_test, OUTPUT);
   pinMode(pin_built_in_led, OUTPUT);
   pinMode(pin_battery_voltage, INPUT);
+
+  // create a thread for ros stuff
+  xTaskCreatePinnedToCore(
+    ros_thread,
+    "ros_thread",
+    8192,
+    NULL,
+    1,
+    NULL,
+    1
+  );
+
 }
 
 double v_bat = NAN;
 
+
+class HangChecker {
+  public:
+  const char * name;
+  unsigned long timeout_ms;
+  unsigned long start_ms;
+  HangChecker(const char * name, unsigned long timeout_ms = 300) {
+    this->name = name;
+    this->timeout_ms = timeout_ms;
+    this->start_ms = millis();
+  }
+
+  ~HangChecker() {
+    unsigned long now = millis();
+    int elapsed = now - start_ms;
+    if (elapsed > timeout_ms) {
+      logf("HANG: %s", name);
+      left_motor.go(0);
+      right_motor.go(0);
+      digitalWrite(pin_built_in_led, HIGH);
+      while (true) {
+        Serial.printf("%s hanged for %d ms\n", name, elapsed);
+
+        delay(1000);
+      }
+    }
+  } 
+
+};
+
+
+
 void loop() {
   last_loop_time_ms = loop_time_ms;
   loop_time_ms = millis();
-  if (has_mpu) read_mpu();
   while (gps_serial.available()) {
     gps.encode(gps_serial.read());
   }
@@ -493,18 +543,33 @@ void loop() {
   bool every_100_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 100);
   bool every_1000_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 1000);
 
-  if (isnan(v_bat) || every_1000_ms) {
-    analogReadResolution(12);
-    int sum = 0;
-    for (int i = 0; i < 16; i++) {
-      sum += analogRead(pin_battery_voltage);
-    }
-    v_bat = 8.4 * sum / 36823.;
-    Serial.printf("vbat: %0.4f sum: %d\n", v_bat, sum);
+  if (every_1000_ms) {
+    HangChecker hc("encoders");
+    logf("Encoders left: %d,%d right: %d,%d ms: %d, %d", 
+      left_encoder.odometer_a, 
+      left_encoder.odometer_b, 
+      right_encoder.odometer_a, 
+      right_encoder.odometer_b,
+      left_encoder.odometer_ab_us,
+      right_encoder.odometer_ab_us
+    );
   }
 
+  if (isnan(v_bat) || every_1000_ms) {
+    HangChecker hc("battery");
+    analogReadResolution(12);
+    int sum = 0;
+    const int sample_count = 100;
+    for (int i = 0; i < sample_count; i++) {
+      sum += analogRead(pin_battery_voltage);
+    }
+    v_bat = 8.4 * sum / 36823. *  16 / sample_count;
+
+    battery_msg.data = v_bat;
+  }
 
   if (every_100_ms) {
+    HangChecker hc("fsm");
     fsm.execute();
   }
 
@@ -513,6 +578,7 @@ void loop() {
 
 
   if (every_10_ms) {
+    HangChecker hc("mode event");
     static aux_mode_t last_aux_mode = aux_mode_failsafe;
     aux_mode_t aux_mode;
     if (rx_aux == 0) {
@@ -547,6 +613,7 @@ void loop() {
   
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
+    HangChecker hc("compass");
     compass.read();
 
     // update magnetometer limits
@@ -585,10 +652,14 @@ void loop() {
   // if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
   //   Serial.printf("esc: %d str: %d left_odo: %d  right_odo: %d\n",rx_esc, rx_str, left_encoder.odometer_a, right_encoder.odometer_a);
   // }
-
-  crsf.update(); // update as fast as possible, will call callbacks when data is ready
+  if(every_10_ms)
+  {
+    HangChecker hc("crsf");
+    crsf.update(); // update as fast as possible, will call callbacks when data is ready
+  }
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 200))
   {
+    HangChecker hc("telemetry");
     crsf.telemetryWriteBattery(v_bat * 100, 0, 0, 0);
     crsf.telemetryWriteCustomFlightMode(fsm.current_task->name, false);
     crsf.telemetryWriteAttitude(0, 0, compass.getAzimuth()*10);
