@@ -94,6 +94,7 @@ RunStatistics crsf_stats("crsf");
 RunStatistics compass_stats("compass");
 RunStatistics telemetry_stats("telemetry");
 RunStatistics serial_read_stats("serial_read");
+RunStatistics process_crsf_byte_stats("process_crsf_byte");
 #include "Crsf.hpp"
 
 
@@ -542,7 +543,7 @@ void loop() {
       right_encoder.odometer_ab_us
     );
 
-    for (auto stats : {log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats}) {
+    for (auto stats : {log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, process_crsf_byte_stats}) {
       stats.to_log_msg(&log_msg);
       log(log_msg);
     }
