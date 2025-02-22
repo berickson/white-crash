@@ -4,10 +4,10 @@
 
 namespace crsf_ns {
 
-  struct RcData {
-  bool failsafe = true ;
+struct RcData {
+  bool failsafe = true;
   uint16_t channels[16] = {0};
-};  
+};
 
 typedef void (*RcCallback)(RcData &);
 
@@ -20,11 +20,10 @@ const uint16_t crsf_rc_channel_range = crsf_rc_channel_max - crsf_rc_channel_min
 float crsf_rc_channel_to_float(uint16_t value) {
   using namespace crsf_ns;
 
-  return (value -  crsf_rc_channel_center) * 2.0 / crsf_rc_channel_range;
+  return (value - crsf_rc_channel_center) * 2.0 / crsf_rc_channel_range;
 }
 
-} // crsf_ns
-
+}  // namespace crsf_ns
 
 namespace internal_to_crsf {
 
@@ -52,14 +51,12 @@ enum CrsfFrameType {
   CRSF_FRAMETYPE_COMMAND = 0x32,
   // MSP commands
   CRSF_FRAMETYPE_MSP_REQ =
-      0x7A,  // response request using msp sequence as command
-  CRSF_FRAMETYPE_MSP_RESP = 0x7B,   // reply with 58 byte chunked binary
-  CRSF_FRAMETYPE_MSP_WRITE = 0x7C,  // write with 8 byte chunked binary (OpenTX
-                                    // outbound telemetry buffer limit)
+      0x7A,                               // response request using msp sequence as command
+  CRSF_FRAMETYPE_MSP_RESP = 0x7B,         // reply with 58 byte chunked binary
+  CRSF_FRAMETYPE_MSP_WRITE = 0x7C,        // write with 8 byte chunked binary (OpenTX
+                                          // outbound telemetry buffer limit)
   CRSF_FRAMETYPE_DISPLAYPORT_CMD = 0x7D,  // displayport control command
 };
-
-
 
 struct CrsfRcChannelsPacked {
   uint16_t channel_01 : 11;
@@ -119,12 +116,9 @@ struct CrsfGPS {
 
 }  // namespace internal_to_crsf
 
-
 class Crsf {
-
  private:
   crsf_ns::RcCallback rc_callback;
-
 
   // for input state machine
   uint8_t length_byte = 0;
@@ -142,119 +136,118 @@ class Crsf {
   unsigned long last_rc_packet_time = 0;
 
  public:
-   void set_rc_callback(crsf_ns::RcCallback callback) {
-     rc_callback = callback;
-   }
- 
-   enum PackateState {
-     awaiting_start,
-     awaiting_device_address,
-     awaiting_length,
-     awaiting_frame_type,
-     awaiting_payload,
-     awaiting_crc
-   } packet_state;
- 
- 
-   void process_payload() {
+  void set_rc_callback(crsf_ns::RcCallback callback) {
+    rc_callback = callback;
+  }
+
+  enum PackateState {
+    awaiting_start,
+    awaiting_device_address,
+    awaiting_length,
+    awaiting_frame_type,
+    awaiting_payload,
+    awaiting_crc
+  } packet_state;
+
+  void process_payload() {
     using namespace internal_to_crsf;
-     CrsfFrameType frame_type = static_cast<CrsfFrameType>(payload[0]);
-     void *data = payload + 1;
-     if (frame_type == CRSF_FRAMETYPE_RC_CHANNELS_PACKED) {
-       CrsfRcChannelsPacked *rc_channels = (CrsfRcChannelsPacked *)data;
-       rc_data.failsafe = false;
-       rc_data.channels[0] = rc_channels->channel_01;
-       rc_data.channels[1] = rc_channels->channel_02;
-       rc_data.channels[2] = rc_channels->channel_03;
-       rc_data.channels[3] = rc_channels->channel_04;
-       rc_data.channels[4] = rc_channels->channel_05;
-       rc_data.channels[5] = rc_channels->channel_06;
-       rc_data.channels[6] = rc_channels->channel_07;
-       rc_data.channels[7] = rc_channels->channel_08;
-       rc_data.channels[8] = rc_channels->channel_09;
-       rc_data.channels[9] = rc_channels->channel_10;
-       rc_data.channels[10] = rc_channels->channel_11;
-       rc_data.channels[11] = rc_channels->channel_12;
-       rc_data.channels[12] = rc_channels->channel_13;
-       rc_data.channels[13] = rc_channels->channel_14;
-       rc_data.channels[14] = rc_channels->channel_15;
-       rc_data.channels[15] = rc_channels->channel_16;
- 
-        if(rc_callback) {
-          rc_callback(rc_data);
-        }
-        last_rc_packet_time = millis();
-     } else if (frame_type == CRSF_FRAMETYPE_LINK_STATISTICS) {
+    CrsfFrameType frame_type = static_cast<CrsfFrameType>(payload[0]);
+    void *data = payload + 1;
+    if (frame_type == CRSF_FRAMETYPE_RC_CHANNELS_PACKED) {
+      CrsfRcChannelsPacked *rc_channels = (CrsfRcChannelsPacked *)data;
+      rc_data.failsafe = false;
+      rc_data.channels[0] = rc_channels->channel_01;
+      rc_data.channels[1] = rc_channels->channel_02;
+      rc_data.channels[2] = rc_channels->channel_03;
+      rc_data.channels[3] = rc_channels->channel_04;
+      rc_data.channels[4] = rc_channels->channel_05;
+      rc_data.channels[5] = rc_channels->channel_06;
+      rc_data.channels[6] = rc_channels->channel_07;
+      rc_data.channels[7] = rc_channels->channel_08;
+      rc_data.channels[8] = rc_channels->channel_09;
+      rc_data.channels[9] = rc_channels->channel_10;
+      rc_data.channels[10] = rc_channels->channel_11;
+      rc_data.channels[11] = rc_channels->channel_12;
+      rc_data.channels[12] = rc_channels->channel_13;
+      rc_data.channels[13] = rc_channels->channel_14;
+      rc_data.channels[14] = rc_channels->channel_15;
+      rc_data.channels[15] = rc_channels->channel_16;
+
+      if (rc_callback) {
+        rc_callback(rc_data);
+      }
+      last_rc_packet_time = millis();
+    } else if (frame_type == CRSF_FRAMETYPE_LINK_STATISTICS) {
       // todo: send link statistics callback, maybe trigger failsafe
 
-     } else {
-        ++unknown_frame_type_count;
-     }
-   }
-   void process_crsf_byte(uint8_t c) {
+    } else {
+      ++unknown_frame_type_count;
+    }
+  }
+  void process_crsf_byte(uint8_t c) {
     using namespace internal_to_crsf;
- 
-     if (packet_state == awaiting_start) {
-       if (c == crsf_sync_byte) {
-         packet_state = awaiting_length;
-       } else {
+
+    if (packet_state == awaiting_start) {
+      if (c == crsf_sync_byte) {
+        packet_state = awaiting_length;
+      } else {
         ++frame_error_count;
-       }
-     }
-     else if (packet_state == awaiting_length) {
-       length_byte = c;
-       if (length_byte > 62) {
-         packet_state = awaiting_start;
-         return;
-       }
-       packet_state = awaiting_payload;
-       payload_length = 0;
-     }
-     else if (packet_state == awaiting_payload) {
-       payload[payload_length] = c;
-       payload_length++;
-       const int max_payload_length = sizeof(payload);
+      }
+    } else if (packet_state == awaiting_length) {
+      length_byte = c;
+      if (length_byte > 62) {
+        packet_state = awaiting_start;
+        return;
+      }
+      packet_state = awaiting_payload;
+      payload_length = 0;
+    } else if (packet_state == awaiting_payload) {
+      payload[payload_length] = c;
+      payload_length++;
+      const int max_payload_length = sizeof(payload);
 
-       if (payload_length >= length_byte - 1) {
-         packet_state = awaiting_crc;
-       }
-     } else if (packet_state == awaiting_crc) {
-       uint8_t crc = c;
-       uint8_t offset = 2;
-       uint8_t calculated_crc = crc8(payload, payload_length);
-        if (crc == calculated_crc) {
-          process_payload();
-        } else {
-          ++crc_error_count;;
-        }
-       packet_state = awaiting_start;
-     }
-   }
-
+      if (payload_length >= length_byte - 1) {
+        packet_state = awaiting_crc;
+      }
+    } else if (packet_state == awaiting_crc) {
+      uint8_t crc = c;
+      uint8_t offset = 2;
+      uint8_t calculated_crc = crc8(payload, payload_length);
+      if (crc == calculated_crc) {
+        process_payload();
+      } else {
+        ++crc_error_count;
+        ;
+      }
+      packet_state = awaiting_start;
+    }
+  }
 
  public:
   HardwareSerial &crsf_serial;
-  Crsf(HardwareSerial &serial) : crsf_serial(serial) {}
+  Crsf(HardwareSerial &serial)
+      : crsf_serial(serial) {}
 
-  void begin() { crsf_serial.begin(420000); }
-
+  void begin() {
+    crsf_serial.begin(420000);
+  }
 
   void update() {
     serial_read_stats.start();
     bool available = crsf_serial.available();
     serial_read_stats.stop();
     while (available) {
-        uint8_t c = crsf_serial.read();
-        process_crsf_byte(c);
-        serial_read_stats.start();
-        available = crsf_serial.available();
-        serial_read_stats.stop();
+      uint8_t c = crsf_serial.read();
+      process_crsf_byte(c);
+      serial_read_stats.start();
+      available = crsf_serial.available();
+      serial_read_stats.stop();
     }
 
     if (rc_data.failsafe == false && millis() - last_rc_packet_time > 1000) {
       rc_data.failsafe = true;
       memset(rc_data.channels, 0, sizeof(rc_data.channels));
-      if(rc_callback) {
+      if (rc_callback) {
         rc_callback(rc_data);
       }
     }
@@ -309,7 +302,7 @@ class Crsf {
 
     write_crsf_frame(internal_to_crsf::CRSF_FRAMETYPE_ATTITUDE, (uint8_t *)&buffer,
                      sizeof(buffer));
-  } 
+  }
 
   void send_battery(float voltage, float current, uint32_t mah_used,
                     uint8_t percent_remaining) {
