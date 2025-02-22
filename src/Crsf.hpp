@@ -23,16 +23,10 @@ float crsf_rc_channel_to_float(uint16_t value) {
   return (value -  crsf_rc_channel_center) * 2.0 / crsf_rc_channel_range;
 }
 
-}
+} // crsf_ns
 
 
 namespace internal_to_crsf {
-
-void print_bytes(uint8_t *bytes, uint8_t size) {
-  for (int i = 0; i < size; i++) {
-    Serial.printf("0x%02X ", bytes[i]);
-  }
-}
 
 const int crsf_sync_byte = 0xC8;
 
@@ -138,6 +132,12 @@ class Crsf {
   uint8_t payload_length = 0;
   uint8_t frame_type = 0;
 
+  // error tracking
+  uint32_t crc_error_count = 0;
+  uint32_t frame_error_count = 0;
+  uint32_t buffer_full_count = 0;
+  uint32_t unknown_frame_type_count = 0;
+
   crsf_ns::RcData rc_data;
   unsigned long last_rc_packet_time = 0;
 
@@ -185,20 +185,10 @@ class Crsf {
         }
         last_rc_packet_time = millis();
      } else if (frame_type == CRSF_FRAMETYPE_LINK_STATISTICS) {
-       CrsfLinkStatistics *link_stats = (CrsfLinkStatistics *)data;
-       // Serial.printf("Link Stats: up_rssi_ant1: %d up_rssi_ant2: %d
-       // up_link_quality: %d up_snr: %d active_antenna: %d rf_profile: %d
-       // up_rf_power: %d down_rssi: %d down_link_quality: %d down_snr: %d\n",
-       //   link_stats->up_rssi_ant1, link_stats->up_rssi_ant2,
-       //   link_stats->up_link_quality, link_stats->up_snr,
-       //   link_stats->active_antenna, link_stats->rf_profile,
-       //   link_stats->up_rf_power, link_stats->down_rssi,
-       //   link_stats->down_link_quality, link_stats->down_snr);
+      // todo: send link statistics callback, maybe trigger failsafe
+
      } else {
-       Serial.printf("Frame type: 0x%02X\n", frame_type);
-       Serial.printf("Payload: ");
-       internal_to_crsf::print_bytes(payload, payload_length);
-       Serial.println();
+        ++unknown_frame_type_count;
      }
    }
    void process_crsf_byte(uint8_t c) {
@@ -208,7 +198,7 @@ class Crsf {
        if (c == crsf_sync_byte) {
          packet_state = awaiting_length;
        } else {
-        // todo: this is an protocol error, track them
+        ++frame_error_count;
        }
      }
      else if (packet_state == awaiting_length) {
@@ -232,19 +222,11 @@ class Crsf {
        uint8_t crc = c;
        uint8_t offset = 2;
        uint8_t calculated_crc = crc8(payload, payload_length);
-       if (crc == calculated_crc) {
-         process_payload();
-       } else {
-         Serial.printf(
-             "CRC FAIL, was 0x%02X expected 0x%02X length 0x%02X "
-             "payload_length 0x%02X\n",
-             calculated_crc, crc, length_byte, payload_length);
-         Serial.printf("Payload: ");
-         print_bytes(payload, payload_length);
-         Serial.println();
-       }
-       Serial.flush();
-       //  while(1) delay(1000);
+        if (crc == calculated_crc) {
+          process_payload();
+        } else {
+          ++crc_error_count;;
+        }
        packet_state = awaiting_start;
      }
    }
@@ -261,17 +243,14 @@ class Crsf {
     serial_read_stats.start();
     bool available = crsf_serial.available();
     serial_read_stats.stop();
-    if (available) {
-      while (crsf_serial.available()) {
+    while (available) {
         uint8_t c = crsf_serial.read();
-        // Serial.printf("0x%02X ", c);
         process_crsf_byte(c);
         serial_read_stats.start();
         available = crsf_serial.available();
         serial_read_stats.stop();
-      }
-      // Serial.println();
     }
+
     if (rc_data.failsafe == false && millis() - last_rc_packet_time > 1000) {
       rc_data.failsafe = true;
       memset(rc_data.channels, 0, sizeof(rc_data.channels));
@@ -293,13 +272,10 @@ class Crsf {
     }
     payload[payload[1] + 1] = crc8(payload + 2, payload[1] - 1);
     if (crsf_serial.availableForWrite() < payload[1] + 2) {
-      Serial.println("crsf serial write buffer full, skipped write_crsf_frame");
+      ++buffer_full_count;
       return;
     }
     crsf_serial.write(payload, payload[1] + 2);
-    //  Serial.printf("Sent frame ");
-    //   print_bytes(payload, payload[1]+2);
-    //   Serial.println();
   }
 
   void send_flight_mode(const char *mode) {
