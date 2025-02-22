@@ -3,12 +3,27 @@
 #include "Crc8.h"
 
 namespace crsf_ns {
+
   struct RcData {
-    bool failsafe = true ;
-    uint16_t channels[16] = {0};
-  };  
-  
-  typedef void (*RcCallback)(RcData &);
+  bool failsafe = true ;
+  uint16_t channels[16] = {0};
+};  
+
+typedef void (*RcCallback)(RcData &);
+
+const uint16_t crsf_rc_channel_min = 172;
+const uint16_t crsf_rc_channel_max = 1811;
+const uint16_t crsf_rc_channel_center = 992;
+const uint16_t crsf_rc_channel_range = crsf_rc_channel_max - crsf_rc_channel_min;
+
+// returns float [0, 1] from crsf rc channel value
+float crsf_rc_channel_to_float(uint16_t value) {
+  using namespace crsf_ns;
+
+  (float) (value -  crsf_rc_channel_center) * 2.0 / crsf_rc_channel_range;
+  return (float) value / 2047.0 - 1.0;
+}
+
 }
 
 
@@ -50,6 +65,8 @@ enum CrsfFrameType {
                                     // outbound telemetry buffer limit)
   CRSF_FRAMETYPE_DISPLAYPORT_CMD = 0x7D,  // displayport control command
 };
+
+
 
 struct CrsfRcChannelsPacked {
   uint16_t channel_01 : 11;

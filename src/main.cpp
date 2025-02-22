@@ -294,38 +294,17 @@ void update_motor_speeds()
     return;
   }
 
-  double speed = 0.0;
-  double str_speed = 0.0;
+  double speed = crsf_ns::crsf_rc_channel_to_float(rx_esc);
+  double str_speed = crsf_ns::crsf_rc_channel_to_float(rx_str);
 
-  // calibration constants
-  const double min_esc = 176;
-  const double max_esc = 1810;
-  const double min_str = 176;
-  const double max_str = 1810;
-  const double esc_deadband_low = 980;
-  const double esc_deadband_high = 1000;
-  const double str_deadband_low = 980;
-  const double str_deadband_high = 1000;
-
-  if (rx_esc > esc_deadband_high) {
-    speed = (rx_esc - esc_deadband_high) / (max_esc - esc_deadband_high);
-  }
-  else if (rx_esc < esc_deadband_low) {
-    speed = (rx_esc - esc_deadband_low) / (esc_deadband_low - min_esc);
-  }
-  else {
+  // don't move if speed is too low
+  if (abs(speed) < 0.05) {
     speed = 0.0;
+    if(abs(str_speed) < 0.05) {
+      str_speed = 0.0;
+    }
   }
 
-  if (rx_str > str_deadband_high) {
-    str_speed = (rx_str - str_deadband_high) / (max_str - str_deadband_high);
-  }
-  else if (rx_str < str_deadband_low) {
-    str_speed = (rx_str - str_deadband_low) / (str_deadband_low - min_str);
-  }
-  else {
-    str_speed = 0.0;
-  }
 
   if (abs(speed) + abs(str_speed) > 1.0) {
     double scale = 1.0 / (abs(speed) + abs(str_speed));
@@ -335,12 +314,6 @@ void update_motor_speeds()
 
   float right_speed = speed + str_speed;
   float left_speed = speed - str_speed;
-
-  // Serial.printf("speed: %0.4f str_speed: %0.4f left_speed: %0.4f right_speed: %0.4f\n",
-  //   speed,
-  //   str_speed,
-  //   left_speed,
-  //   right_speed);
 
   right_motor.go(right_speed, false);
   left_motor.go(left_speed, false);
