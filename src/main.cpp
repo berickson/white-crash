@@ -2,6 +2,7 @@
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
 #include "drv8833.h"
+#include "Crsf.hpp"
 #include "CRSFforArduino.hpp"
 #include "TinyGPS++.h"
 #include "quadrature_encoder.h"
@@ -20,6 +21,8 @@
 #include <std_msgs/msg/int32.h>
 #include <std_msgs/msg/string.h>
 #include <std_msgs/msg/float32.h>
+
+#include "RunStatistics.h"
 
 
 #include "secrets/wifi_login.h"
@@ -63,8 +66,8 @@ const int pin_right_encoder_a = 35;
 const int pin_right_encoder_b = 36;
 const int pin_gps_rx = 37;
 const int pin_gps_tx = 38;
-const int pin_csrf_rx = 39;
-const int pin_csrf_tx = 40;
+const int pin_crsf_rx = 39;
+const int pin_crsf_tx = 40;
 
 static bool has_mpu = false;
 
@@ -86,10 +89,16 @@ int rx_str = 0;
 int rx_esc = 0;
 int rx_aux = 0;
 
+RunStatistics log_stats("logf");
+RunStatistics loop_stats("loop");
+RunStatistics crsf_stats("crsf");
+RunStatistics compass_stats("compass");
+RunStatistics telemetry_stats("telemetry");
+
 
 
 // set up crsf serial to use pin_csrf_rx and pin_csrf_tx
-CRSFforArduino crsf = CRSFforArduino(&crsf_serial);
+Crsf crsf(crsf_serial);
 
 //////////////////////////////////
 // Micro Ros
@@ -107,15 +116,24 @@ rcl_node_t node;
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
 
 // logs to ros and serial
+void log(std_msgs__msg__String & msg) {
+  log_stats.start();
+  RCSOFTCHECK(rcl_publish(&log_publisher, &msg, NULL));
+  Serial.write(msg.data.data, msg.data.size);
+  Serial.write("\n");
+  log_stats.stop();
+}
+
 void logf(const char * format, ...) {
   va_list args;
   va_start(args, format);
   log_msg.data.size = vsnprintf(log_msg.data.data, log_msg.data.capacity, format, args);
-  // RCSOFTCHECK(rcl_publish(&log_publisher, &log_msg, NULL));
+  RCSOFTCHECK(rcl_publish(&log_publisher, &log_msg, NULL));
   va_end(args);
-  Serial.write(log_msg.data.data, log_msg.data.size);
-  Serial.write("\n");
+
+  log(log_msg);
 }
+
 
 void error_loop(){
  }
@@ -175,19 +193,17 @@ void right_b_changed() {
   right_encoder.sensor_b_changed();
 }
 
-void handle_crsf_message(serialReceiverLayer::rcChannels_t * rc_channels) {
-  const int axis_count = 15;
-  static float axes[axis_count];
+void handle_crsf_message(crsf_ns::RcData & rc_data) {
 
-  if(rc_channels->failsafe ){
+  if(rc_data.failsafe ){
     rx_str = 0;
     rx_esc = 0;
     rx_aux = 0;
 
   } else {
-    rx_str = crsf.getChannel(1);
-    rx_esc = crsf.getChannel(2);
-    rx_aux = crsf.getChannel(3);
+    rx_str = rc_data.channels[0];
+    rx_esc = rc_data.channels[1];
+    rx_aux = rc_data.channels[2];
   }
 }
 
@@ -439,10 +455,11 @@ void setup() {
   Serial.begin(115200);
 
 
+  // preallocate log message for all logging
   log_msg.data.data = (char *) malloc(200);
   log_msg.data.capacity = 200;
   log_msg.data.size = 0;
-  // setup_micro_ros();
+  setup_micro_ros();
 
   Wire.setPins(pin_compass_sda, pin_compass_scl);
   Wire.begin();
@@ -451,7 +468,7 @@ void setup() {
   fsm.begin();
 
   Serial.write("tank-train\n");
-  crsf_serial.begin(420000, SERIAL_8N1, pin_csrf_rx, pin_csrf_tx);
+  crsf_serial.begin(420000, SERIAL_8N1, pin_crsf_rx, pin_crsf_tx);
   gps_serial.begin(115200, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
   compass.init();
   compass.setCalibration(-950, 675, -1510, 47, 0, 850);
@@ -467,17 +484,11 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(pin_right_encoder_a), right_a_changed, CHANGE);
   attachInterrupt(digitalPinToInterrupt(pin_right_encoder_b), right_b_changed, CHANGE);
 
-
-
   // crsf
-  if (!crsf.begin()) {
-    while (true){
-        Serial.println("CRSF for Arduino initialization failed!");
-        delay(1000);
-    }
-  }
+  crsf.begin();
+  crsf.update();
 
-  crsf.setRcChannelsCallback(handle_crsf_message);
+  crsf.set_rc_callback(handle_crsf_message);
  
   left_motor.init(pin_left_fwd, pin_left_rev);
   right_motor.init(pin_right_fwd, pin_right_rev);
@@ -486,7 +497,7 @@ void setup() {
   pinMode(pin_battery_voltage, INPUT);
 
   // create a thread for ros stuff
-  xTaskCreatePinnedToCore(
+  if (0) xTaskCreatePinnedToCore(
     ros_thread,
     "ros_thread",
     8192,
@@ -506,7 +517,7 @@ class HangChecker {
   const char * name;
   unsigned long timeout_ms;
   unsigned long start_ms;
-  HangChecker(const char * name, unsigned long timeout_ms = 300) {
+  HangChecker(const char * name, unsigned long timeout_ms = 3000) {
     this->name = name;
     this->timeout_ms = timeout_ms;
     this->start_ms = millis();
@@ -532,7 +543,10 @@ class HangChecker {
 
 
 
+
+
 void loop() {
+  loop_stats.start();
   last_loop_time_ms = loop_time_ms;
   loop_time_ms = millis();
   while (gps_serial.available()) {
@@ -553,6 +567,11 @@ void loop() {
       left_encoder.odometer_ab_us,
       right_encoder.odometer_ab_us
     );
+
+    for (auto stats : {log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats}) {
+      stats.to_log_msg(&log_msg);
+      log(log_msg);
+    }
   }
 
   if (isnan(v_bat) || every_1000_ms) {
@@ -613,6 +632,7 @@ void loop() {
   
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
+    compass_stats.start();
     HangChecker hc("compass");
     compass.read();
 
@@ -640,6 +660,7 @@ void loop() {
     //   compass.getX(), compass.getY(), compass.getZ(),
     //   min_x, max_x, min_y, max_y, min_z, max_z
     // );
+    compass_stats.stop();
   }
 
   // blink for a few ms every second to show signs of life
@@ -654,17 +675,20 @@ void loop() {
   // }
   if(every_10_ms)
   {
-    HangChecker hc("crsf");
+    crsf_stats.start();
+    // HangChecker hc("crsf");
     crsf.update(); // update as fast as possible, will call callbacks when data is ready
+    crsf_stats.stop();
   }
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 200))
   {
     HangChecker hc("telemetry");
-    crsf.telemetryWriteBattery(v_bat * 100, 0, 0, 0);
-    crsf.telemetryWriteCustomFlightMode(fsm.current_task->name, false);
-    crsf.telemetryWriteAttitude(0, 0, compass.getAzimuth()*10);
+    telemetry_stats.start();
+    crsf.send_battery(v_bat, 0, 0, 0);
+    crsf.send_flight_mode(fsm.current_task->name);
+    //crsf.telemetryWriteAttitude(0, 0, compass.getAzimuth()*10);
     if(gps.location.isValid()) {
-      crsf.telemetryWriteGPS(
+      crsf.send_gps(
         gps.location.lat(), 
         gps.location.lng(), 
         gps.altitude.meters(), 
@@ -672,8 +696,9 @@ void loop() {
         gps.course.deg(), 
         gps.satellites.value());
     } else {
-      crsf.telemetryWriteGPS(0, 0, 0, 0, 0, 0);
+      crsf.send_gps(0, 0, 0, 0, 0, 0);
     }
+    telemetry_stats.stop();
   
   }
 
@@ -682,6 +707,7 @@ void loop() {
   }
 
   digitalWrite(pin_test, !digitalRead(pin_test));
+  loop_stats.stop();
 }
 
 
