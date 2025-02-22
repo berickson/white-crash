@@ -20,8 +20,7 @@ const uint16_t crsf_rc_channel_range = crsf_rc_channel_max - crsf_rc_channel_min
 float crsf_rc_channel_to_float(uint16_t value) {
   using namespace crsf_ns;
 
-  (float) (value -  crsf_rc_channel_center) * 2.0 / crsf_rc_channel_range;
-  return (float) value / 2047.0 - 1.0;
+  return (value -  crsf_rc_channel_center) * 2.0 / crsf_rc_channel_range;
 }
 
 }
@@ -204,32 +203,28 @@ class Crsf {
    }
    void process_crsf_byte(uint8_t c) {
     using namespace internal_to_crsf;
-     // working size: 0x1A offset: 0x02 length:0x16: checksum: 0x32
  
      if (packet_state == awaiting_start) {
-       if (c == 0xC8) {
+       if (c == crsf_sync_byte) {
          packet_state = awaiting_length;
        } else {
-         printf("Unexpected byte 0x%02X\n", c);
+        // todo: this is an protocol error, track them
        }
      }
-     // else if (packet_state == awaiting_device_address) {
-     //   device_address = c;
-     //   packet_state = awaiting_length;
-     // }
      else if (packet_state == awaiting_length) {
        length_byte = c;
+       if (length_byte > 62) {
+         packet_state = awaiting_start;
+         return;
+       }
        packet_state = awaiting_payload;
        payload_length = 0;
      }
-     // else if (packet_state == awaiting_frame_type) {
-     //   frame_type = c;
-     //   packet_state = awaiting_payload;
-     // }
      else if (packet_state == awaiting_payload) {
        payload[payload_length] = c;
        payload_length++;
- 
+       const int max_payload_length = sizeof(payload);
+
        if (payload_length >= length_byte - 1) {
          packet_state = awaiting_crc;
        }
