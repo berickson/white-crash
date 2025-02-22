@@ -2,7 +2,6 @@
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
 #include "drv8833.h"
-#include "Crsf.hpp"
 #include "CRSFforArduino.hpp"
 #include "TinyGPS++.h"
 #include "quadrature_encoder.h"
@@ -94,6 +93,8 @@ RunStatistics loop_stats("loop");
 RunStatistics crsf_stats("crsf");
 RunStatistics compass_stats("compass");
 RunStatistics telemetry_stats("telemetry");
+RunStatistics serial_read_stats("serial_read");
+#include "Crsf.hpp"
 
 
 
@@ -568,7 +569,7 @@ void loop() {
       right_encoder.odometer_ab_us
     );
 
-    for (auto stats : {log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats}) {
+    for (auto stats : {log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats}) {
       stats.to_log_msg(&log_msg);
       log(log_msg);
     }
@@ -686,7 +687,7 @@ void loop() {
     telemetry_stats.start();
     crsf.send_battery(v_bat, 0, 0, 0);
     crsf.send_flight_mode(fsm.current_task->name);
-    //crsf.telemetryWriteAttitude(0, 0, compass.getAzimuth()*10);
+    crsf.send_attitude(0, 0, compass.getAzimuth());
     if(gps.location.isValid()) {
       crsf.send_gps(
         gps.location.lat(), 

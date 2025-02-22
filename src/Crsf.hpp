@@ -92,6 +92,12 @@ struct CrsfBatterySensor {
   uint8_t remaining;       // Battery remaining (percent)
 } __attribute__((packed));
 
+struct CrsfAttitude {
+  int16_t pitch;  // Pitch angle (LSB = 100 µrad)
+  int16_t roll;   // Roll angle  (LSB = 100 µrad)
+  int16_t yaw;    // Yaw angle   (LSB = 100 µrad)
+} __attribute__((packed));
+
 struct CrsfGPS {
   int32_t latitude;      // degree / 10`000`000
   int32_t longitude;     // degree / 10`000`000
@@ -240,11 +246,17 @@ class Crsf {
 
 
   void update() {
-    if (crsf_serial.available()) {
+    serial_read_stats.start();
+    bool available = crsf_serial.available();
+    serial_read_stats.stop();
+    if (available) {
       while (crsf_serial.available()) {
         uint8_t c = crsf_serial.read();
         // Serial.printf("0x%02X ", c);
         process_crsf_byte(c);
+        serial_read_stats.start();
+        available = crsf_serial.available();
+        serial_read_stats.stop();
       }
       // Serial.println();
     }
@@ -283,6 +295,33 @@ class Crsf {
 
     write_crsf_frame(internal_to_crsf::CRSF_FRAMETYPE_FLIGHT_MODE, (uint8_t *)mode, length);
   }
+
+  void send_attitude(float pitch_degrees, float roll_degrees, float yaw_degrees) {
+    auto degrees_to_decirad = [](float degrees) -> int16_t {
+      // degrees must be [-180, 180]
+      while (degrees < -180) degrees += 360;
+      while (degrees > 180) degrees -= 360;
+
+      float radians = degrees * PI / 180;
+      return radians * 10000;
+    };
+
+    internal_to_crsf::CrsfAttitude attitude;
+    attitude.pitch = degrees_to_decirad(pitch_degrees);
+    attitude.roll = degrees_to_decirad(roll_degrees);
+    attitude.yaw = degrees_to_decirad(yaw_degrees);
+
+    char buffer[6];
+    buffer[0] = attitude.pitch >> 8 & 0xFF;
+    buffer[1] = attitude.pitch & 0xFF;
+    buffer[2] = attitude.roll >> 8 & 0xFF;
+    buffer[3] = attitude.roll & 0xFF;
+    buffer[4] = attitude.yaw >> 8 & 0xFF;
+    buffer[5] = attitude.yaw & 0xFF;
+
+    write_crsf_frame(internal_to_crsf::CRSF_FRAMETYPE_ATTITUDE, (uint8_t *)&buffer,
+                     sizeof(buffer));
+  } 
 
   void send_battery(float voltage, float current, uint32_t mah_used,
                     uint8_t percent_remaining) {
