@@ -5,6 +5,7 @@
 #include "Arduino.h"
 #include "utils.h"
 
+
 class DRV8833 {
     public:
         void init(int pin_fwd , int pin_rev, int frequency = 30000, int resolution = 10) {
@@ -18,9 +19,14 @@ class DRV8833 {
             analogWriteResolution(resolution);
         }
 
+        inline float get_setpoint() {
+            return setpoint;
+        }
+
         // rate is [-1.0,1.0], fast_decay will cause faster
         // deceleration
         void go(float rate, bool fast_decay = true) {
+            setpoint = rate;
             pinMode(pin_fwd, OUTPUT);
             pinMode(pin_rev, OUTPUT);
             rate = clamp(rate, -1.0f, 1.0f);
@@ -41,6 +47,7 @@ class DRV8833 {
         }
 
     private:
+        float setpoint = 0.0;
         int pin_fwd = 0;
         int pin_rev = 0;
         int frequency = 1000;

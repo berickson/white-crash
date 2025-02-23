@@ -21,6 +21,7 @@
 #include <std_msgs/msg/float32.h>
 
 #include "RunStatistics.h"
+#include "StuckChecker.h"
 
 
 #include "secrets/wifi_login.h"
@@ -94,6 +95,9 @@ RunStatistics compass_stats("compass");
 RunStatistics telemetry_stats("telemetry");
 RunStatistics serial_read_stats("serial_read");
 RunStatistics process_crsf_byte_stats("process_crsf_byte");
+
+StuckChecker left_stuck_checker;
+StuckChecker right_stuck_checker;
 
 //////////////////////////////////
 // Micro Ros
@@ -526,10 +530,6 @@ class HangChecker {
 
 };
 
-
-
-
-
 void loop() {
   loop_stats.start();
   last_loop_time_ms = loop_time_ms;
@@ -597,6 +597,20 @@ void loop() {
 
   // read mode from rx_aux channel
   enum aux_mode_t {aux_mode_failsafe, aux_mode_hand, aux_mode_off, aux_mode_auto};
+
+  // if a motor is on for more than 1 second with no progress, report it as stuck
+  if (every_100_ms) {
+    left_stuck_checker.update(left_motor.get_setpoint(), left_encoder.odometer_a);
+    right_stuck_checker.update(right_motor.get_setpoint(), right_encoder.odometer_a);
+
+    if (left_stuck_checker.is_stuck()) {
+      logf("Left motor is stuck", left_motor.get_setpoint(), left_encoder.odometer_a);
+    }
+
+    if (right_stuck_checker.is_stuck()) {
+      logf("Right motor is stuck", right_motor.get_setpoint(), right_encoder.odometer_a);
+    }
+  }
 
 
   if (every_10_ms) {
