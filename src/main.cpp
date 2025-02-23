@@ -83,6 +83,7 @@ int rx_str = 0;
 int rx_esc = 0;
 int rx_aux = 0;
 
+RunStatistics gps_stats("gps");
 RunStatistics log_stats("logf");
 RunStatistics loop_stats("loop");
 RunStatistics crsf_stats("crsf");
@@ -448,6 +449,7 @@ void setup() {
   Serial.write("tank-train\n");
   crsf_serial.setRxBufferSize(4096);
   crsf_serial.begin(420000, SERIAL_8N1, pin_crsf_rx, pin_crsf_tx);
+  gps_serial.setRxBufferSize(4096);
   gps_serial.begin(115200, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
   compass.init();
   compass.setCalibration(-950, 675, -1510, 47, 0, 850);
@@ -486,6 +488,8 @@ void setup() {
     1
   );
 
+  logf("%s", "*********************** setup complete ***********************");
+
 }
 
 double v_bat = NAN;
@@ -496,7 +500,7 @@ class HangChecker {
   const char * name;
   unsigned long timeout_ms;
   unsigned long start_ms;
-  HangChecker(const char * name, unsigned long timeout_ms = 500) {
+  HangChecker(const char * name, unsigned long timeout_ms = 100) {
     this->name = name;
     this->timeout_ms = timeout_ms;
     this->start_ms = millis();
@@ -528,13 +532,26 @@ void loop() {
   loop_stats.start();
   last_loop_time_ms = loop_time_ms;
   loop_time_ms = millis();
-  while (gps_serial.available()) {
-    gps.encode(gps_serial.read());
-  }
+
 
   bool every_10_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 10);
   bool every_100_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 100);
   bool every_1000_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 1000);
+
+  if (every_10_ms)
+  {
+    gps_stats.start();
+    HangChecker hc("gps");
+    int available = gps_serial.available();
+    if (available > 3000) {
+      logf("gps buffer overflow: %d", available);
+      while (gps_serial.read() >= 0) {}
+    }
+    while (gps_serial.available()) {
+      gps.encode(gps_serial.read());
+    }
+    gps_stats.stop();
+  }
 
   if (every_1000_ms) {
     HangChecker hc("encoders");
@@ -547,7 +564,7 @@ void loop() {
       right_encoder.odometer_ab_us
     );
 
-    for (auto stats : {log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, process_crsf_byte_stats}) {
+    for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, process_crsf_byte_stats}) {
       stats.to_log_msg(&log_msg);
       log(log_msg);
     }
@@ -654,6 +671,7 @@ void loop() {
   // }
   if(every_10_ms)
   {
+    HangChecker hc("crsf");
     crsf_stats.start();
     // HangChecker hc("crsf");
     crsf.update(); // update as fast as possible, will call callbacks when data is ready

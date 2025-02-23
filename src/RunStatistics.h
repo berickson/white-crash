@@ -63,12 +63,13 @@ class RunStatistics {
 
   void to_log_msg( std_msgs__msg__String * log_msg) {
     log_msg->data.size =  snprintf(log_msg->data.data, log_msg->data.capacity, 
-      "%12s: count=%8d mean=%8.3f stddev=%8.3f max=%8.3f last=%8.3f",
+      "%12s: count=%8d mean=%8.3f stddev=%8.3f max=%8.3f total=%8.3f last=%8.3f",
       name.c_str(),
       count,
       mean()/1000000.,
       stddev()/1000000.,
       max()/1000000.,
+      sum_elapsed_us/1000000.,
       last()/1000000.
     );
   }
