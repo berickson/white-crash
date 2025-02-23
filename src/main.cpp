@@ -2,7 +2,6 @@
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
 #include "drv8833.h"
-#include "CRSFforArduino.hpp"
 #include "TinyGPS++.h"
 #include "quadrature_encoder.h"
 #include <QMC5883LCompass.h>
@@ -68,10 +67,6 @@ const int pin_gps_tx = 38;
 const int pin_crsf_rx = 39;
 const int pin_crsf_tx = 40;
 
-static bool has_mpu = false;
-
-
-
 //////////////////////////////////
 // Globals
 
@@ -95,12 +90,6 @@ RunStatistics compass_stats("compass");
 RunStatistics telemetry_stats("telemetry");
 RunStatistics serial_read_stats("serial_read");
 RunStatistics process_crsf_byte_stats("process_crsf_byte");
-#include "Crsf.hpp"
-
-
-
-// set up crsf serial to use pin_csrf_rx and pin_csrf_tx
-Crsf crsf(crsf_serial);
 
 //////////////////////////////////
 // Micro Ros
@@ -109,6 +98,7 @@ rcl_publisher_t log_publisher;
 rcl_publisher_t battery_publisher;
 std_msgs__msg__String log_msg;
 std_msgs__msg__Float32 battery_msg;
+
 
 rclc_support_t support;
 rcl_allocator_t allocator;
@@ -155,6 +145,7 @@ void setup_micro_ros() {
 
   allocator = rcl_get_default_allocator();
 
+
   //create init_options
   RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
 
@@ -178,6 +169,18 @@ void setup_micro_ros() {
 
   Serial.printf("micro ros initialized\n");
 }
+
+
+//////////////////////////////////
+// CRSF - include here so it can use logging, etc.
+
+#include "Crsf.hpp"
+
+
+
+// set up crsf serial to use pin_csrf_rx and pin_csrf_tx
+Crsf crsf(crsf_serial);
+
 
 //////////////////////////////////
 // Interrupt handlers
@@ -443,6 +446,7 @@ void setup() {
   fsm.begin();
 
   Serial.write("tank-train\n");
+  crsf_serial.setRxBufferSize(4096);
   crsf_serial.begin(420000, SERIAL_8N1, pin_crsf_rx, pin_crsf_tx);
   gps_serial.begin(115200, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
   compass.init();
@@ -492,7 +496,7 @@ class HangChecker {
   const char * name;
   unsigned long timeout_ms;
   unsigned long start_ms;
-  HangChecker(const char * name, unsigned long timeout_ms = 3000) {
+  HangChecker(const char * name, unsigned long timeout_ms = 500) {
     this->name = name;
     this->timeout_ms = timeout_ms;
     this->start_ms = millis();
@@ -503,14 +507,14 @@ class HangChecker {
     int elapsed = now - start_ms;
     if (elapsed > timeout_ms) {
       logf("HANG: %s", name);
-      left_motor.go(0);
-      right_motor.go(0);
-      digitalWrite(pin_built_in_led, HIGH);
-      while (true) {
-        Serial.printf("%s hanged for %d ms\n", name, elapsed);
+      // left_motor.go(0);
+      // right_motor.go(0);
+      // digitalWrite(pin_built_in_led, HIGH);
+      // while (true) {
+      //   Serial.printf("%s hanged for %d ms\n", name, elapsed);
 
-        delay(1000);
-      }
+      //   delay(1000);
+      // }
     }
   } 
 
@@ -681,7 +685,7 @@ void loop() {
     // Serial.printf("mode: %s str: %d esc: %d aux: %d\n", fsm.current_task->name, rx_str, rx_esc, rx_aux);
   }
 
-  digitalWrite(pin_test, !digitalRead(pin_test));
+  digitalWrite(pin_test, !digitalRead(pin_test));\
   loop_stats.stop();
 }
 
