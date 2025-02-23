@@ -23,6 +23,12 @@ float crsf_rc_channel_to_float(uint16_t value) {
   return (value - crsf_rc_channel_center) * 2.0 / crsf_rc_channel_range;
 }
 
+// returns a bool for a pushbutton / toggle switch, true if above center
+float crsf_rc_channel_to_bool(uint16_t value) {
+  using namespace crsf_ns;
+  return value > crsf_rc_channel_center;
+}
+
 }  // namespace crsf_ns
 
 namespace internal_to_crsf {

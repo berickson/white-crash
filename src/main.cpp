@@ -1,52 +1,49 @@
-#include <Arduino.h>
 #include <Adafruit_Sensor.h>
-#include <Wire.h>
-#include "drv8833.h"
-#include "TinyGPS++.h"
-#include "quadrature_encoder.h"
+#include <Arduino.h>
 #include <QMC5883LCompass.h>
+#include <SPIFFS.h>
+#include <Wire.h>
+
 #include <vector>
+
 #include "Fsm.h"
+#include "TinyGPS++.h"
+#include "drv8833.h"
+#include "quadrature_encoder.h"
 
 // micro ros
 #include <micro_ros_platformio.h>
-
-
 #include <rcl/rcl.h>
-#include <rclc/rclc.h>
 #include <rclc/executor.h>
-
+#include <rclc/rclc.h>
+#include <std_msgs/msg/float32.h>
 #include <std_msgs/msg/int32.h>
 #include <std_msgs/msg/string.h>
-#include <std_msgs/msg/float32.h>
 
 #include "RunStatistics.h"
 #include "StuckChecker.h"
-
-
 #include "secrets/wifi_login.h"
 
 // calibration constants
 float meters_per_odometer_tick = 0.00008204;
 
-
 // hard code some interesting gps locations
 class lat_lon {
-public:
+ public:
   double lat;
   double lon;
 };
-
-
 
 lat_lon sidewalk_in_front_of_driveway = {33.802051, -118.123404};
 lat_lon sidewalk_by_jimbos_house = {33.802057, -118.123248};
 
 std::vector<lat_lon> route_waypoints = {
-  sidewalk_by_jimbos_house,
-  sidewalk_in_front_of_driveway,
+    sidewalk_by_jimbos_house,
+    sidewalk_in_front_of_driveway,
 };
 
+// where we store the compass calibration
+const char *compass_calibration_file_path = "/compass_calibration.txt";
 
 //////////////////////////////////
 // pin assignments
@@ -86,6 +83,7 @@ QuadratureEncoder right_encoder(pin_right_encoder_a, pin_right_encoder_b);
 int rx_str = 0;
 int rx_esc = 0;
 int rx_aux = 0;
+bool button_sc_pressed = false;
 
 RunStatistics gps_stats("gps");
 RunStatistics log_stats("logf");
@@ -107,16 +105,26 @@ rcl_publisher_t battery_publisher;
 std_msgs__msg__String log_msg;
 std_msgs__msg__Float32 battery_msg;
 
-
 rclc_support_t support;
 rcl_allocator_t allocator;
 rcl_node_t node;
 
-#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
-#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
+#define RCCHECK(fn)                \
+  {                                \
+    rcl_ret_t temp_rc = fn;        \
+    if ((temp_rc != RCL_RET_OK)) { \
+      error_loop();                \
+    }                              \
+  }
+#define RCSOFTCHECK(fn)            \
+  {                                \
+    rcl_ret_t temp_rc = fn;        \
+    if ((temp_rc != RCL_RET_OK)) { \
+    }                              \
+  }
 
 // logs to ros and serial
-void log(std_msgs__msg__String & msg) {
+void log(std_msgs__msg__String &msg) {
   log_stats.start();
   RCSOFTCHECK(rcl_publish(&log_publisher, &msg, NULL));
   Serial.write(msg.data.data, msg.data.size);
@@ -124,7 +132,7 @@ void log(std_msgs__msg__String & msg) {
   log_stats.stop();
 }
 
-void logf(const char * format, ...) {
+void logf(const char *format, ...) {
   va_list args;
   va_start(args, format);
   log_msg.data.size = vsnprintf(log_msg.data.data, log_msg.data.capacity, format, args);
@@ -133,61 +141,52 @@ void logf(const char * format, ...) {
   log(log_msg);
 }
 
-
-void error_loop(){
- }
-
-
+void error_loop() {
+}
 
 void setup_micro_ros() {
   Serial.printf("setting up micro ros\n");
-  IPAddress agent_ip(192,168,86,66);
+  IPAddress agent_ip(192, 168, 86, 66);
   size_t agent_port = 8888;
-  
-  char * ssid = const_cast<char *>(wifi_ssid);
-  char * psk = const_cast<char *> (wifi_password);
-  
+
+  char *ssid = const_cast<char *>(wifi_ssid);
+  char *psk = const_cast<char *>(wifi_password);
+
   set_microros_wifi_transports(ssid, psk, agent_ip, agent_port);
   delay(2000);
 
   allocator = rcl_get_default_allocator();
 
-
-  //create init_options
+  // create init_options
   RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
 
   // create node
   RCCHECK(rclc_node_init_default(&node, "micro_ros_arduino_wifi_node", "", &support));
 
   // create publishers
-  
+
   RCCHECK(rclc_publisher_init_best_effort(
-    &log_publisher,
-    &node,
-    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
-    "/tank/log"));
+      &log_publisher,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+      "/tank/log"));
 
   RCCHECK(rclc_publisher_init_best_effort(
       &battery_publisher,
       &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
       "/tank/battery"));
-  
 
   Serial.printf("micro ros initialized\n");
 }
-
 
 //////////////////////////////////
 // CRSF - include here so it can use logging, etc.
 
 #include "Crsf.hpp"
 
-
-
 // set up crsf serial to use pin_csrf_rx and pin_csrf_tx
 Crsf crsf(crsf_serial);
-
 
 //////////////////////////////////
 // Interrupt handlers
@@ -205,9 +204,8 @@ void right_b_changed() {
   right_encoder.sensor_b_changed();
 }
 
-void handle_crsf_message(crsf_ns::RcData & rc_data) {
-
-  if(rc_data.failsafe ){
+void handle_rc_message(crsf_ns::RcData &rc_data) {
+  if (rc_data.failsafe) {
     rx_str = 0;
     rx_esc = 0;
     rx_aux = 0;
@@ -216,6 +214,7 @@ void handle_crsf_message(crsf_ns::RcData & rc_data) {
     rx_str = rc_data.channels[0];
     rx_esc = rc_data.channels[1];
     rx_aux = rc_data.channels[2];
+    button_sc_pressed = crsf_ns::crsf_rc_channel_to_bool(rc_data.channels[6]);
   }
 }
 
@@ -225,8 +224,6 @@ unsigned long loop_time_ms = 0;
 bool every_n_ms(unsigned long last_loop_ms, unsigned long loop_ms, unsigned long ms) {
   return (last_loop_ms % ms) + (loop_ms - last_loop_ms) >= ms;
 }
-
-
 
 // sets motor speeds to go to a lat/lon
 // returns true if arrived
@@ -256,48 +253,45 @@ bool go_toward_lat_lon(lat_lon destination) {
     heading_error += 360;
   }
 
-
   double left_motor_speed = 0.0;
   double right_motor_speed = 0.0;
   std::string direction;
 
-    if (heading_error < -20) {
-      // turn left
-      left_motor_speed = 0.7;
-      right_motor_speed = 1.0;
-      direction = "left";
-    } else if (heading_error > 20) {
-      // turn right
-      left_motor_speed = 1.0;
-      right_motor_speed = 0.7;
-      direction = "left";
-    } else {
-      // go straight
-      left_motor_speed = 1.0;
-      right_motor_speed = 1.0;
-      direction = "straight";
-    }
+  if (heading_error < -20) {
+    // turn left
+    left_motor_speed = 0.7;
+    right_motor_speed = 1.0;
+    direction = "left";
+  } else if (heading_error > 20) {
+    // turn right
+    left_motor_speed = 1.0;
+    right_motor_speed = 0.7;
+    direction = "left";
+  } else {
+    // go straight
+    left_motor_speed = 1.0;
+    right_motor_speed = 1.0;
+    direction = "straight";
+  }
 
+  // printf("left_motor_speed: %0.4f right_motor_speed: %0.4f\n", left_motor_speed, right_motor_speed);
+  left_motor.go(left_motor_speed);
+  right_motor.go(right_motor_speed);
 
-    //printf("left_motor_speed: %0.4f right_motor_speed: %0.4f\n", left_motor_speed, right_motor_speed);
-    left_motor.go(left_motor_speed);
-    right_motor.go(right_motor_speed);
-
-    if (every_n_ms(last_loop_time_ms, loop_time_ms, 1000)) {
-      logf("destination: %f %f direction: %s, distance_remaining: %0.4f, desired_bearing_degrees: %0.4f current_heading_degrees: %0.4f heading_error: %0.4f\n",
-        destination.lat,
-        destination.lon,
-        direction.c_str(),
-        distance_remaining,
-        desired_bearing_degrees,
-        current_heading_degrees,
-        heading_error);
-    }
-    return false;
+  if (every_n_ms(last_loop_time_ms, loop_time_ms, 1000)) {
+    logf("destination: %f %f direction: %s, distance_remaining: %0.4f, desired_bearing_degrees: %0.4f current_heading_degrees: %0.4f heading_error: %0.4f\n",
+         destination.lat,
+         destination.lon,
+         direction.c_str(),
+         distance_remaining,
+         desired_bearing_degrees,
+         current_heading_degrees,
+         heading_error);
+  }
+  return false;
 }
 
-void update_motor_speeds()
-{
+void update_motor_speeds() {
   // stop on failsafe
   if (rx_esc == 0 || rx_str == 0) {
     right_motor.go(0);
@@ -311,11 +305,10 @@ void update_motor_speeds()
   // don't move if speed is too low
   if (abs(speed) < 0.05) {
     speed = 0.0;
-    if(abs(str_speed) < 0.05) {
+    if (abs(str_speed) < 0.05) {
       str_speed = 0.0;
     }
   }
-
 
   if (abs(speed) + abs(str_speed) > 1.0) {
     double scale = 1.0 / (abs(speed) + abs(str_speed));
@@ -330,30 +323,104 @@ void update_motor_speeds()
   left_motor.go(left_speed, false);
 }
 
+void update_compass_calibration(int min_x, int max_x, int min_y, int max_y, int min_z, int max_z) {
+  float avg_x = (max_x + min_x) / 2.0;
+  float avg_y = (max_y + min_y) / 2.0;
+  float avg_z = (max_z + min_z) / 2.0;
+  compass.setCalibrationOffsets(
+      avg_x,
+      avg_y,
+      avg_z);
+
+  float delta_x = max_x - min_x;
+  float delta_y = max_y - min_y;
+  float delta_avg = (delta_x + delta_y) / 2.0;
+
+  float scale_x = delta_avg / delta_x;
+  float scale_y = delta_avg / delta_y;
+  float scale_z = 1.0;
+
+  compass.setCalibrationScales(
+    scale_x, scale_y, scale_z);
+  
+  logf("updated compass calibration: %0.4f %0.4f %0.4f scale_x: %0.4f scale_y: %0.4f scale_z:\n", avg_x, avg_y, avg_z, scale_x, scale_y, scale_z);
+
+}
 
 //////////////////////////////////
 // Finite state machine
 class HandMode : public Task {
-  public:
+ public:
   HandMode() {
     name = "hand";
   }
 
   // implement the execute method
-  virtual void execute() override{
+  virtual void execute() override {
     update_motor_speeds();
   }
 
 } hand_mode;
 
+class CalibrateCompassMode : public Task {
+ public:
+  int min_x, max_x, min_y, max_y, min_z, max_z;
+
+  CalibrateCompassMode() {
+    name = "cal-comp";
+  }
+
+  virtual void begin() override {
+    logf("calibrate compass mode\n");
+    compass.clearCalibration();
+    min_x = min_y = min_z = std::numeric_limits<int>::max();
+    max_x = max_y = max_z = std::numeric_limits<int>::min();
+  }
+
+  // implement the execute method
+  virtual void execute() override {
+    update_motor_speeds();
+
+    int x = compass.getX();
+    int y = compass.getY();
+    int z = compass.getZ();
+
+    logf("compass_xyz: %d %d %d\n", x, y, z);
+    if (x < min_x) min_x = x;
+    if (x > max_x) max_x = x;
+    if (y < min_y) min_y = y;
+    if (y > max_y) max_y = y;
+    if (z < min_z) min_z = z;
+    if (z > max_z) max_z = z;
+  }
+
+  virtual void end() override {
+    update_compass_calibration(min_x, max_x, min_y, max_y, min_z, max_z);
+
+    logf("calibrated compass: %d %d %d %d %d %d\n", min_x, max_x, min_y, max_y, min_z, max_z);
+
+    // write to flash memory
+    {
+      File file = SPIFFS.open(compass_calibration_file_path, FILE_WRITE);
+      if (!file) {
+        logf("failed to open file for writing\n");
+      } else {
+        file.printf("%d,%d,%d,%d,%d,%d\n", min_x, max_x, min_y, max_y, min_z, max_z);
+        file.close();
+      }
+    }
+  }
+
+} calibrate_compass_mode;
+
 class OffMode : public Task {
-  public:
+ public:
   OffMode() {
     name = "off";
   }
 
   // implement the execute method
-  virtual void execute() override{
+  virtual void execute() override {
     left_motor.go(0);
     right_motor.go(0);
   }
@@ -361,7 +428,7 @@ class OffMode : public Task {
 } off_mode;
 
 class AutoMode : public Task {
-  public:
+ public:
   AutoMode() {
     name = "auto";
   }
@@ -395,7 +462,7 @@ class AutoMode : public Task {
 } auto_mode;
 
 class FailsafeMode : public Task {
-  public:
+ public:
   FailsafeMode() {
     name = "failsafe";
   }
@@ -407,41 +474,85 @@ class FailsafeMode : public Task {
 } failsafe_mode;
 
 std::vector<Task *> tasks = {
-  &hand_mode,
-  &off_mode,
-  &auto_mode,
-  &failsafe_mode,
+    &hand_mode,
+    &off_mode,
+    &auto_mode,
+    &failsafe_mode,
+    &calibrate_compass_mode,
 };
 
 std::vector<Fsm::Edge> edges = {
-  // from, event, to
-  Fsm::Edge("auto", "done", "hand"),
-  Fsm::Edge("*", "auto", "auto"),
-  Fsm::Edge("*", "failsafe", "failsafe"),
-  Fsm::Edge("*", "hand", "hand"),
-  Fsm::Edge("*", "off", "off"),
+    // from, event, to
+    Fsm::Edge("auto", "done", "hand"),
+    Fsm::Edge("hand", "sc-click", "cal-comp"),
+    Fsm::Edge("cal-comp", "sc-click", "hand"),
+    Fsm::Edge("cal-comp", "done", "hand"),
+    Fsm::Edge("*", "auto", "auto"),
+    Fsm::Edge("*", "failsafe", "failsafe"),
+    Fsm::Edge("auto", "hand", "hand"),
+    Fsm::Edge("off", "hand", "hand"),
+    Fsm::Edge("*", "off", "off"),
 };
 
 Fsm fsm(tasks, edges);
 
-
-void ros_thread(void * arg) {
+void ros_thread(void *arg) {
   while (true) {
     // RCSOFTCHECK(rcl_publish(&battery_publisher, &battery_msg, NULL));
     delay(1000);
   }
 }
 
+
+bool load_compass_calibration_from_spiffs() {
+  if (!SPIFFS.exists(compass_calibration_file_path)) {
+    logf("No calibration file found");
+    return false;
+  }
+
+  File file = SPIFFS.open(compass_calibration_file_path, FILE_READ);
+  if (!file) {
+    logf("Failed to open calibration file");
+    return false;
+  }
+
+  String content = file.readStringUntil('\n');
+  file.close();
+
+  // Parse comma-separated values
+  int comma1 = content.indexOf(',');
+  int comma2 = content.indexOf(',', comma1 + 1);
+  int comma3 = content.indexOf(',', comma2 + 1);
+  int comma4 = content.indexOf(',', comma3 + 1);
+  int comma5 = content.indexOf(',', comma4 + 1);
+
+  if (comma1 == -1 || comma2 == -1 || comma3 == -1 || comma4 == -1 || comma5 == -1) {
+    logf("Invalid calibration format");
+    return false;
+  }
+
+  int min_x = content.substring(0, comma1).toInt();
+  int max_x = content.substring(comma1 + 1, comma2).toInt();
+  int min_y = content.substring(comma2 + 1, comma3).toInt();
+  int max_y = content.substring(comma3 + 1, comma4).toInt();
+  int min_z = content.substring(comma4 + 1, comma5).toInt();
+  int max_z = content.substring(comma5 + 1).toInt();
+
+  update_compass_calibration(min_x, max_x, min_y, max_y, min_z, max_z);
+
+  return true;
+}
+
 //////////////////////////////////
 // Main setup and loop
-
 
 void setup() {
   Serial.begin(115200);
 
+  SPIFFS.begin();
 
   // preallocate log message for all logging
-  log_msg.data.data = (char *) malloc(200);
+  log_msg.data.data = (char *)malloc(200);
   log_msg.data.capacity = 200;
   log_msg.data.size = 0;
   setup_micro_ros();
@@ -458,14 +569,14 @@ void setup() {
   gps_serial.setRxBufferSize(4096);
   gps_serial.begin(115200, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
   compass.init();
-  compass.setCalibration(-950, 675, -1510, 47, 0, 850);
+  if (!load_compass_calibration_from_spiffs()) {
+    compass.setCalibration(-950, 675, -1510, 47, 0, 850);
+  }
   // see https://www.magnetic-declination.com/
   compass.setMagneticDeclination(11, 24);
 
-
-
   // quadrature encoders
-  
+
   attachInterrupt(digitalPinToInterrupt(pin_left_encoder_a), left_a_changed, CHANGE);
   attachInterrupt(digitalPinToInterrupt(pin_left_encoder_b), left_b_changed, CHANGE);
   attachInterrupt(digitalPinToInterrupt(pin_right_encoder_a), right_a_changed, CHANGE);
@@ -475,8 +586,8 @@ void setup() {
   crsf.begin();
   crsf.update();
 
-  crsf.set_rc_callback(handle_crsf_message);
- 
+  crsf.set_rc_callback(handle_rc_message);
+
   left_motor.init(pin_left_fwd, pin_left_rev);
   right_motor.init(pin_right_fwd, pin_right_rev);
   pinMode(pin_test, OUTPUT);
@@ -485,28 +596,25 @@ void setup() {
 
   // create a thread for ros stuff
   if (0) xTaskCreatePinnedToCore(
-    ros_thread,
-    "ros_thread",
-    8192,
-    NULL,
-    1,
-    NULL,
-    1
-  );
+      ros_thread,
+      "ros_thread",
+      8192,
+      NULL,
+      1,
+      NULL,
+      1);
 
   logf("%s", "*********************** setup complete ***********************");
-
 }
 
 double v_bat = NAN;
 
-
 class HangChecker {
-  public:
-  const char * name;
+ public:
+  const char *name;
   unsigned long timeout_ms;
   unsigned long start_ms;
-  HangChecker(const char * name, unsigned long timeout_ms = 100) {
+  HangChecker(const char *name, unsigned long timeout_ms = 100) {
     this->name = name;
     this->timeout_ms = timeout_ms;
     this->start_ms = millis();
@@ -526,8 +634,7 @@ class HangChecker {
       //   delay(1000);
       // }
     }
-  } 
-
+  }
 };
 
 void loop() {
@@ -535,19 +642,18 @@ void loop() {
   last_loop_time_ms = loop_time_ms;
   loop_time_ms = millis();
 
-
   bool every_10_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 10);
   bool every_100_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 100);
   bool every_1000_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 1000);
 
-  if (every_10_ms)
-  {
+  if (every_10_ms) {
     gps_stats.start();
     HangChecker hc("gps");
     int available = gps_serial.available();
     if (available > 3000) {
       logf("gps buffer overflow: %d", available);
-      while (gps_serial.read() >= 0) {}
+      while (gps_serial.read() >= 0) {
+      }
     }
     while (gps_serial.available()) {
       gps.encode(gps_serial.read());
@@ -557,19 +663,17 @@ void loop() {
 
   if (every_1000_ms) {
     HangChecker hc("encoders");
-    logf("Encoders left: %d,%d right: %d,%d ms: %d, %d", 
-      left_encoder.odometer_a, 
-      left_encoder.odometer_b, 
-      right_encoder.odometer_a, 
-      right_encoder.odometer_b,
-      left_encoder.odometer_ab_us,
-      right_encoder.odometer_ab_us
-    );
+    logf("Encoders left: %d,%d right: %d,%d ms: %d, %d",
+         left_encoder.odometer_a,
+         left_encoder.odometer_b,
+         right_encoder.odometer_a,
+         right_encoder.odometer_b,
+         left_encoder.odometer_ab_us,
+         right_encoder.odometer_ab_us);
 
-    logf("meters traveled: %0.4f, %0.4f", 
-      left_encoder.odometer_a * meters_per_odometer_tick,
-      right_encoder.odometer_a * meters_per_odometer_tick
-    );
+    logf("meters traveled: %0.4f, %0.4f",
+         left_encoder.odometer_a * meters_per_odometer_tick,
+         right_encoder.odometer_a * meters_per_odometer_tick);
 
     for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, process_crsf_byte_stats}) {
       stats.to_log_msg(&log_msg);
@@ -585,7 +689,7 @@ void loop() {
     for (int i = 0; i < sample_count; i++) {
       sum += analogRead(pin_battery_voltage);
     }
-    v_bat = 8.4 * sum / 36823. *  16 / sample_count;
+    v_bat = 8.4 * sum / 36823. * 16 / sample_count;
 
     battery_msg.data = v_bat;
   }
@@ -596,7 +700,10 @@ void loop() {
   }
 
   // read mode from rx_aux channel
-  enum aux_mode_t {aux_mode_failsafe, aux_mode_hand, aux_mode_off, aux_mode_auto};
+  enum aux_mode_t { aux_mode_failsafe,
+                    aux_mode_hand,
+                    aux_mode_off,
+                    aux_mode_auto };
 
   // if a motor is on for more than 1 second with no progress, report it as stuck
   if (every_100_ms) {
@@ -612,16 +719,17 @@ void loop() {
     }
   }
 
-
   if (every_10_ms) {
     HangChecker hc("mode event");
     static aux_mode_t last_aux_mode = aux_mode_failsafe;
+    static bool last_button_sc_pressed = false;
+
     aux_mode_t aux_mode;
     if (rx_aux == 0) {
       aux_mode = aux_mode_failsafe;
     } else if (rx_aux < 500) {
       aux_mode = aux_mode_hand;
-    } else if (rx_aux < 1200) { 
+    } else if (rx_aux < 1200) {
       aux_mode = aux_mode_off;
     } else {
       aux_mode = aux_mode_auto;
@@ -644,9 +752,15 @@ void loop() {
           fsm.set_event("failsafe");
       }
     }
+
+    // sc event
+    if (button_sc_pressed && !last_button_sc_pressed) {
+      fsm.set_event("sc-click");
+      logf("sc-click");
+    }
     last_aux_mode = aux_mode;
+    last_button_sc_pressed = button_sc_pressed;
   }
-  
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
     compass_stats.start();
@@ -672,8 +786,8 @@ void loop() {
     if (y > max_y) max_y = y;
     if (z > max_z) max_z = z;
 
-    // Serial.printf("compass: %d [%d, %d, %d] limits (%d, %d, %d, %d %d %d)\n", 
-    //   compass.getAzimuth(), 
+    // Serial.printf("compass: %d [%d, %d, %d] limits (%d, %d, %d, %d %d %d)\n",
+    //   compass.getAzimuth(),
     //   compass.getX(), compass.getY(), compass.getZ(),
     //   min_x, max_x, min_y, max_y, min_z, max_z
     // );
@@ -690,42 +804,37 @@ void loop() {
   // if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
   //   Serial.printf("esc: %d str: %d left_odo: %d  right_odo: %d\n",rx_esc, rx_str, left_encoder.odometer_a, right_encoder.odometer_a);
   // }
-  if(every_10_ms)
-  {
+  if (every_10_ms) {
     HangChecker hc("crsf");
     crsf_stats.start();
     // HangChecker hc("crsf");
-    crsf.update(); // update as fast as possible, will call callbacks when data is ready
+    crsf.update();  // update as fast as possible, will call callbacks when data is ready
     crsf_stats.stop();
   }
-  if (every_n_ms(last_loop_time_ms, loop_time_ms, 200))
-  {
+  if (every_n_ms(last_loop_time_ms, loop_time_ms, 200)) {
     HangChecker hc("telemetry");
     telemetry_stats.start();
     crsf.send_battery(v_bat, 0, 0, 0);
     crsf.send_flight_mode(fsm.current_task->name);
     crsf.send_attitude(0, 0, compass.getAzimuth());
-    if(gps.location.isValid()) {
+    if (gps.location.isValid()) {
       crsf.send_gps(
-        gps.location.lat(), 
-        gps.location.lng(), 
-        gps.altitude.meters(), 
-        gps.speed.kmph(), 
-        gps.course.deg(), 
-        gps.satellites.value());
+          gps.location.lat(),
+          gps.location.lng(),
+          gps.altitude.meters(),
+          gps.speed.kmph(),
+          gps.course.deg(),
+          gps.satellites.value());
     } else {
       crsf.send_gps(0, 0, 0, 0, 0, 0);
     }
     telemetry_stats.stop();
-  
   }
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
     // Serial.printf("mode: %s str: %d esc: %d aux: %d\n", fsm.current_task->name, rx_str, rx_esc, rx_aux);
   }
 
-  digitalWrite(pin_test, !digitalRead(pin_test));\
+  digitalWrite(pin_test, !digitalRead(pin_test));
   loop_stats.stop();
 }
-
-
