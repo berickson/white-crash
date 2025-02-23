@@ -25,6 +25,9 @@
 
 #include "secrets/wifi_login.h"
 
+// calibration constants
+float meters_per_odometer_tick = 0.00008204;
+
 
 // hard code some interesting gps locations
 class lat_lon {
@@ -58,8 +61,8 @@ const int pin_battery_voltage = 9;
 
 const int pin_built_in_led = 15;
 
-const int pin_left_encoder_a = 33;
-const int pin_left_encoder_b = 34;
+const int pin_left_encoder_b = 33;
+const int pin_left_encoder_a = 34;
 const int pin_right_encoder_a = 35;
 const int pin_right_encoder_b = 36;
 const int pin_gps_rx = 37;
@@ -121,7 +124,6 @@ void logf(const char * format, ...) {
   va_list args;
   va_start(args, format);
   log_msg.data.size = vsnprintf(log_msg.data.data, log_msg.data.capacity, format, args);
-  RCSOFTCHECK(rcl_publish(&log_publisher, &log_msg, NULL));
   va_end(args);
 
   log(log_msg);
@@ -562,6 +564,11 @@ void loop() {
       right_encoder.odometer_b,
       left_encoder.odometer_ab_us,
       right_encoder.odometer_ab_us
+    );
+
+    logf("meters traveled: %0.4f, %0.4f", 
+      left_encoder.odometer_a * meters_per_odometer_tick,
+      right_encoder.odometer_a * meters_per_odometer_tick
     );
 
     for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, process_crsf_byte_stats}) {
