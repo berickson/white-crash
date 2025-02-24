@@ -1,4 +1,3 @@
-#include <Adafruit_Sensor.h>
 #include <Arduino.h>
 #include <QMC5883LCompass.h>
 #include <SPIFFS.h>
@@ -25,7 +24,7 @@
 #include "secrets/wifi_login.h"
 
 
-#include "SparkFun_Ublox_Arduino_Library.h" //http://librarymanager/All#SparkFun_u-blox_GNSS
+#include <SparkFun_u-blox_GNSS_Arduino_Library.h> // https://github.com/sparkfun/SparkFun_Ublox_Arduino_Library
 
 // calibration constants
 float meters_per_odometer_tick = 0.00008204;
@@ -89,7 +88,7 @@ DRV8833 right_motor;
 HardwareSerial crsf_serial(0);
 HardwareSerial gps_serial(1);
 TinyGPSPlus gps;
-SFE_UBLOX_GPS myGPS;
+SFE_UBLOX_GNSS gnss;
 
 QMC5883LCompass compass;
 QuadratureEncoder left_encoder(pin_left_encoder_a, pin_left_encoder_b, meters_per_odometer_tick);
@@ -242,13 +241,16 @@ bool every_n_ms(unsigned long last_loop_ms, unsigned long loop_ms, unsigned long
 // sets motor speeds to go to a lat/lon
 // returns true if arrived
 bool go_toward_lat_lon(lat_lon destination, float * meters_to_next_waypoint) {
-  if (!gps.location.isValid()) {
+  if (gnss.getGnssFixOk() == 0) {
     left_motor.go(0);
     right_motor.go(0);
     return false;
   }
 
-  double distance_remaining = gps.distanceBetween(gps.location.lat(), gps.location.lng(), destination.lat, destination.lon);
+  double gnss_lat = gnss.getLatitude(0) / 1E7;
+  double gnss_lon = gnss.getLongitude(0) / 1E7;
+
+  double distance_remaining = gps.distanceBetween(gnss_lat, gnss_lon, destination.lat, destination.lon);
   *meters_to_next_waypoint = distance_remaining;
   if (distance_remaining < 2.0) {
     left_motor.go(0);
@@ -257,7 +259,7 @@ bool go_toward_lat_lon(lat_lon destination, float * meters_to_next_waypoint) {
   }
 
   // subtract courseTo from 360 to get postive ccw
-  double desired_bearing_degrees = 360. - gps.courseTo(gps.location.lat(), gps.location.lng(), destination.lat, destination.lon);
+  double desired_bearing_degrees = 360. - gps.courseTo(gnss_lat, gnss_lon, destination.lat, destination.lon);
   double current_heading_degrees = compass.getAzimuth();
 
   double heading_error = desired_bearing_degrees - current_heading_degrees;
@@ -594,34 +596,6 @@ bool load_compass_calibration_from_spiffs() {
   return true;
 }
 
-void show_my_gps() {
-  {
-    
-    long latitude = myGPS.getLatitude();
-    Serial.print(F("Lat: "));
-    Serial.print(latitude);
-
-    long longitude = myGPS.getLongitude();
-    Serial.print(F(" Long: "));
-    Serial.print(longitude);
-    Serial.print(F(" (degrees * 10^-7)"));
-
-    long altitude = myGPS.getAltitude();
-    Serial.print(F(" Alt: "));
-    Serial.print(altitude);
-    Serial.print(F(" (mm)"));
-
-    byte SIV = myGPS.getSIV();
-    Serial.print(F(" SIV: "));
-    Serial.print(SIV);
-
-    float lat = latitude / 10000000.0;
-    float lon = longitude / 10000000.0;
-    Serial.printf("Lat: %f Lon: %f\n", lat, lon);
-
-    Serial.println();
-  }
-}
 
 //////////////////////////////////
 // Main setup and loop
@@ -651,13 +625,15 @@ void setup() {
 
   //delay(10000); /// just wait for serial monitor to open
 
-  if (!myGPS.begin(gps_serial)) {
+  if (gnss.begin(gps_serial)) {
     bool implicit_update = false;
     bool assume_auto = true;
-    myGPS.assumeAutoPVT(assume_auto, implicit_update);
-    Serial.printf("GPS failed to start\n");
-  } else {
+    gnss.assumeAutoPVT(assume_auto, implicit_update);
+    gnss.setNavigationFrequency(4);
+    gnss.setUART2Output(COM_TYPE_UBX);
     Serial.printf("GPS started\n");
+  } else {
+    Serial.printf("GPS failed to start\n");
   }
 
   compass.init();
@@ -762,7 +738,7 @@ void loop() {
   if (every_10_ms) {
     BlockTimer bt(gps_stats);
     HangChecker hc("gps");
-    myGPS.checkUblox();
+    gnss.checkUblox();
   }
 
   if (every_1000_ms) {
@@ -932,16 +908,15 @@ void loop() {
     crsf.send_attitude(0, 0, compass.getAzimuth());
 
     //0=no fix, 1=dead reckoning, 2=2D, 3=3D, 4=GNSS, 5=Time fix
-    auto fix_type = myGPS.getFixType();
 
-    if (fix_type == 2 ||fix_type == 3 || fix_type==4) {
+    if (gnss.getGnssFixOk(0)) {
       crsf.send_gps(
-          myGPS.getLatitude(0),
-          myGPS.getLongitude(0),
-          0,
-          0,
-          0,
-          myGPS.getSIV(0));
+          gnss.getLatitude(0),
+          gnss.getLongitude(0),
+          gnss.getGroundSpeed(0) * 1E-3,
+          gnss.getHeading(0) * 1E-5,
+          gnss.getAltitude(0) * 1E-3,
+          gnss.getSIV(0));
     } else {
       crsf.send_gps(0, 0, 0, 0, 0, 0);
     }
