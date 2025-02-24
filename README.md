@@ -1,4 +1,4 @@
-# Tank-Train
+# White-Crash
 This is for a 3d printed treaded rover robot built with low cost components. It was originally going to be a bunch of rovers that could link together, that's why the name "train". It targets low cost hardware, and all logic runs on a single Esp32-S2 mini.  This personal project isn't targed for others to use, but you're free to try.
 
 [![Tank-Train Rover Demo](assets/rover-demo.png)](https://youtube.com/shorts/mtOcJ6Oahmc)
