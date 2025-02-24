@@ -74,3 +74,14 @@ class RunStatistics {
     );
   }
 };
+
+class BlockTimer {
+  public:
+  RunStatistics & stats;
+  BlockTimer(RunStatistics & stats) : stats(stats) {
+    stats.start();
+  }
+  ~BlockTimer() {
+    stats.stop();
+  }
+};

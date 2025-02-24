@@ -35,11 +35,21 @@ class lat_lon {
 };
 
 lat_lon sidewalk_in_front_of_driveway = {33.802051, -118.123404};
+lat_lon mid1 = {33.8020525,	-118.123365};
+lat_lon mid2 = {33.802054,	-118.123326};
+lat_lon mid3 = {33.8020555,	-118.123287};
 lat_lon sidewalk_by_jimbos_house = {33.802057, -118.123248};
 
 std::vector<lat_lon> route_waypoints = {
     sidewalk_by_jimbos_house,
+    mid1,
+    mid2,
+    mid3,
     sidewalk_in_front_of_driveway,
+    mid3,
+    mid2,
+    mid1,
+    sidewalk_by_jimbos_house,
 };
 
 // where we store the compass calibration
@@ -125,11 +135,10 @@ rcl_node_t node;
 
 // logs to ros and serial
 void log(std_msgs__msg__String &msg) {
-  log_stats.start();
+  BlockTimer bt(log_stats);
   RCSOFTCHECK(rcl_publish(&log_publisher, &msg, NULL));
   Serial.write(msg.data.data, msg.data.size);
   Serial.write("\n");
-  log_stats.stop();
 }
 
 void logf(const char *format, ...) {
@@ -440,6 +449,10 @@ class AutoMode : public Task {
     step = 0;
   }
 
+  void get_display_string(char *buffer, int buffer_size) override {
+    snprintf(buffer, buffer_size, "wp %d", step);
+  }
+
   void execute() override {
     bool arrived = go_toward_lat_lon(route_waypoints[step]);
     if (arrived) {
@@ -604,6 +617,13 @@ void setup() {
       NULL,
       1);
 
+  // reset all serial data
+  while(crsf_serial.available()) {
+    crsf_serial.read();
+  }
+  while(gps_serial.available()) {
+    gps_serial.read();
+  }
   logf("%s", "*********************** setup complete ***********************");
 }
 
@@ -638,7 +658,7 @@ class HangChecker {
 };
 
 void loop() {
-  loop_stats.start();
+  BlockTimer bt(loop_stats);
   last_loop_time_ms = loop_time_ms;
   loop_time_ms = millis();
 
@@ -647,7 +667,7 @@ void loop() {
   bool every_1000_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 1000);
 
   if (every_10_ms) {
-    gps_stats.start();
+    BlockTimer bt(gps_stats);
     HangChecker hc("gps");
     int available = gps_serial.available();
     if (available > 3000) {
@@ -658,7 +678,6 @@ void loop() {
     while (gps_serial.available()) {
       gps.encode(gps_serial.read());
     }
-    gps_stats.stop();
   }
 
   if (every_1000_ms) {
@@ -763,7 +782,7 @@ void loop() {
   }
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
-    compass_stats.start();
+    BlockTimer bt(compass_stats);
     HangChecker hc("compass");
     compass.read();
 
@@ -791,7 +810,6 @@ void loop() {
     //   compass.getX(), compass.getY(), compass.getZ(),
     //   min_x, max_x, min_y, max_y, min_z, max_z
     // );
-    compass_stats.stop();
   }
 
   // blink for a few ms every second to show signs of life
@@ -805,17 +823,18 @@ void loop() {
   //   Serial.printf("esc: %d str: %d left_odo: %d  right_odo: %d\n",rx_esc, rx_str, left_encoder.odometer_a, right_encoder.odometer_a);
   // }
   if (every_10_ms) {
+    BlockTimer bt(crsf_stats);
     HangChecker hc("crsf");
-    crsf_stats.start();
     // HangChecker hc("crsf");
     crsf.update();  // update as fast as possible, will call callbacks when data is ready
-    crsf_stats.stop();
   }
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 200)) {
+    BlockTimer bt(telemetry_stats);
     HangChecker hc("telemetry");
-    telemetry_stats.start();
     crsf.send_battery(v_bat, 0, 0, 0);
-    crsf.send_flight_mode(fsm.current_task->name);
+    char display_string[16];
+    fsm.current_task->get_display_string(display_string, 16);
+    crsf.send_flight_mode(display_string);
     crsf.send_attitude(0, 0, compass.getAzimuth());
     if (gps.location.isValid()) {
       crsf.send_gps(
@@ -828,7 +847,6 @@ void loop() {
     } else {
       crsf.send_gps(0, 0, 0, 0, 0, 0);
     }
-    telemetry_stats.stop();
   }
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
@@ -836,5 +854,4 @@ void loop() {
   }
 
   digitalWrite(pin_test, !digitalRead(pin_test));
-  loop_stats.stop();
 }
