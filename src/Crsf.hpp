@@ -344,12 +344,12 @@ class Crsf {
                      sizeof(buffer));
   }
 
-  void send_gps(float lat, float lon, float groundspeed, float heading,
+  void send_gps(int32_t lat, int32_t lon, float groundspeed, float heading,
                 float altitude, uint8_t satellites) {
     internal_to_crsf::CrsfGPS gps;
     uint8_t buffer[15];
-    gps.latitude = lat * 10000000;
-    gps.longitude = lon * 10000000;
+    gps.latitude = lat;
+    gps.longitude = lon;
     gps.groundspeed = groundspeed * 100;
     gps.heading = heading * 100;
     gps.altitude = altitude + 1000;

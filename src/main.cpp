@@ -24,6 +24,9 @@
 #include "StuckChecker.h"
 #include "secrets/wifi_login.h"
 
+
+#include "SparkFun_Ublox_Arduino_Library.h" //http://librarymanager/All#SparkFun_u-blox_GNSS
+
 // calibration constants
 float meters_per_odometer_tick = 0.00008204;
 
@@ -86,6 +89,8 @@ DRV8833 right_motor;
 HardwareSerial crsf_serial(0);
 HardwareSerial gps_serial(1);
 TinyGPSPlus gps;
+SFE_UBLOX_GPS myGPS;
+
 QMC5883LCompass compass;
 QuadratureEncoder left_encoder(pin_left_encoder_a, pin_left_encoder_b, meters_per_odometer_tick);
 QuadratureEncoder right_encoder(pin_right_encoder_a, pin_right_encoder_b, meters_per_odometer_tick);
@@ -589,6 +594,35 @@ bool load_compass_calibration_from_spiffs() {
   return true;
 }
 
+void show_my_gps() {
+  {
+    
+    long latitude = myGPS.getLatitude();
+    Serial.print(F("Lat: "));
+    Serial.print(latitude);
+
+    long longitude = myGPS.getLongitude();
+    Serial.print(F(" Long: "));
+    Serial.print(longitude);
+    Serial.print(F(" (degrees * 10^-7)"));
+
+    long altitude = myGPS.getAltitude();
+    Serial.print(F(" Alt: "));
+    Serial.print(altitude);
+    Serial.print(F(" (mm)"));
+
+    byte SIV = myGPS.getSIV();
+    Serial.print(F(" SIV: "));
+    Serial.print(SIV);
+
+    float lat = latitude / 10000000.0;
+    float lon = longitude / 10000000.0;
+    Serial.printf("Lat: %f Lon: %f\n", lat, lon);
+
+    Serial.println();
+  }
+}
+
 //////////////////////////////////
 // Main setup and loop
 
@@ -614,6 +648,18 @@ void setup() {
   crsf_serial.begin(420000, SERIAL_8N1, pin_crsf_rx, pin_crsf_tx);
   gps_serial.setRxBufferSize(4096);
   gps_serial.begin(115200, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
+
+  //delay(10000); /// just wait for serial monitor to open
+
+  if (!myGPS.begin(gps_serial)) {
+    bool implicit_update = false;
+    bool assume_auto = true;
+    myGPS.assumeAutoPVT(assume_auto, implicit_update);
+    Serial.printf("GPS failed to start\n");
+  } else {
+    Serial.printf("GPS started\n");
+  }
+
   compass.init();
   if (!load_compass_calibration_from_spiffs()) {
     compass.setCalibration(-950, 675, -1510, 47, 0, 850);
@@ -699,18 +745,24 @@ void loop() {
   bool every_100_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 100);
   bool every_1000_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 1000);
 
+  // if (every_10_ms) {
+  //   BlockTimer bt(gps_stats);
+  //   HangChecker hc("gps");
+  //   int available = gps_serial.available();
+  //   if (available > 3000) {
+  //     logf("gps buffer overflow: %d", available);
+  //     while (gps_serial.read() >= 0) {
+  //     }
+  //   }
+  //   while (gps_serial.available()) {
+  //     gps.encode(gps_serial.read());
+  //   }
+  // }
+
   if (every_10_ms) {
     BlockTimer bt(gps_stats);
     HangChecker hc("gps");
-    int available = gps_serial.available();
-    if (available > 3000) {
-      logf("gps buffer overflow: %d", available);
-      while (gps_serial.read() >= 0) {
-      }
-    }
-    while (gps_serial.available()) {
-      gps.encode(gps_serial.read());
-    }
+    myGPS.checkUblox();
   }
 
   if (every_1000_ms) {
@@ -725,14 +777,21 @@ void loop() {
     //     left_encoder.odometer_ab_us,
     //     right_encoder.odometer_ab_us);
 
+    // logf("Gps Checksums passed: %d failed: %d chars: %d sentences: %d",
+    //       gps.passedChecksum(),
+    //       gps.failedChecksum(),
+    //       gps.charsProcessed(),
+    //       gps.sentencesWithFix()
+    //     );
+
     logf("meters traveled: %0.4f, %0.4f",
          left_encoder.odometer_a * meters_per_odometer_tick,
          right_encoder.odometer_a * meters_per_odometer_tick);
 
-    // for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, process_crsf_byte_stats}) {
-    //   stats.to_log_msg(&log_msg);
-    //   log(log_msg);
-    // }
+    for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, process_crsf_byte_stats}) {
+      stats.to_log_msg(&log_msg);
+      log(log_msg);
+    }
   }
 
   if (isnan(v_bat) || every_1000_ms) {
@@ -871,17 +930,34 @@ void loop() {
     fsm.current_task->get_display_string(display_string, 16);
     crsf.send_flight_mode(display_string);
     crsf.send_attitude(0, 0, compass.getAzimuth());
-    if (gps.location.isValid()) {
+
+    //0=no fix, 1=dead reckoning, 2=2D, 3=3D, 4=GNSS, 5=Time fix
+    auto fix_type = myGPS.getFixType();
+
+    if (fix_type == 2 ||fix_type == 3 || fix_type==4) {
       crsf.send_gps(
-          gps.location.lat(),
-          gps.location.lng(),
-          gps.altitude.meters(),
-          gps.speed.kmph(),
-          gps.course.deg(),
-          gps.satellites.value());
+          myGPS.getLatitude(0),
+          myGPS.getLongitude(0),
+          0,
+          0,
+          0,
+          myGPS.getSIV(0));
     } else {
       crsf.send_gps(0, 0, 0, 0, 0, 0);
     }
+
+
+    // if (gps.location.isValid()) {
+    //   crsf.send_gps(
+    //       gps.location.lat(),
+    //       gps.location.lng(),
+    //       gps.altitude.meters(),
+    //       gps.speed.kmph(),
+    //       gps.course.deg(),
+    //       gps.satellites.value());
+    // } else {
+    //   crsf.send_gps(0, 0, 0, 0, 0, 0);
+    // }
   }
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
