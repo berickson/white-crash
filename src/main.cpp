@@ -41,15 +41,15 @@ lat_lon mid3 = {33.8020555,	-118.123287};
 lat_lon sidewalk_by_jimbos_house = {33.802057, -118.123248};
 
 std::vector<lat_lon> route_waypoints = {
-    sidewalk_by_jimbos_house,
-    mid1,
-    mid2,
-    mid3,
     sidewalk_in_front_of_driveway,
+    mid1,
+    mid2,
+    mid3,
+    sidewalk_by_jimbos_house,
     mid3,
     mid2,
     mid1,
-    sidewalk_by_jimbos_house,
+    sidewalk_in_front_of_driveway,
 };
 
 // where we store the compass calibration
@@ -87,8 +87,8 @@ HardwareSerial crsf_serial(0);
 HardwareSerial gps_serial(1);
 TinyGPSPlus gps;
 QMC5883LCompass compass;
-QuadratureEncoder left_encoder(pin_left_encoder_a, pin_left_encoder_b);
-QuadratureEncoder right_encoder(pin_right_encoder_a, pin_right_encoder_b);
+QuadratureEncoder left_encoder(pin_left_encoder_a, pin_left_encoder_b, meters_per_odometer_tick);
+QuadratureEncoder right_encoder(pin_right_encoder_a, pin_right_encoder_b, meters_per_odometer_tick);
 
 int rx_str = 0;
 int rx_esc = 0;
@@ -236,7 +236,7 @@ bool every_n_ms(unsigned long last_loop_ms, unsigned long loop_ms, unsigned long
 
 // sets motor speeds to go to a lat/lon
 // returns true if arrived
-bool go_toward_lat_lon(lat_lon destination) {
+bool go_toward_lat_lon(lat_lon destination, float * meters_to_next_waypoint) {
   if (!gps.location.isValid()) {
     left_motor.go(0);
     right_motor.go(0);
@@ -244,6 +244,7 @@ bool go_toward_lat_lon(lat_lon destination) {
   }
 
   double distance_remaining = gps.distanceBetween(gps.location.lat(), gps.location.lng(), destination.lat, destination.lon);
+  *meters_to_next_waypoint = distance_remaining;
   if (distance_remaining < 2.0) {
     left_motor.go(0);
     right_motor.go(0);
@@ -438,6 +439,11 @@ class OffMode : public Task {
 
 class AutoMode : public Task {
  public:
+  bool unsticking = false;
+  float meters_to_next_waypoint = 0;
+  float unstick_left_start_meters;
+  float unstick_right_start_meters;
+
   AutoMode() {
     name = "auto";
   }
@@ -450,11 +456,38 @@ class AutoMode : public Task {
   }
 
   void get_display_string(char *buffer, int buffer_size) override {
-    snprintf(buffer, buffer_size, "wp %d", step);
+    snprintf(buffer, buffer_size, "wp%d %3.1f", step, meters_to_next_waypoint);
   }
 
   void execute() override {
-    bool arrived = go_toward_lat_lon(route_waypoints[step]);
+
+    if (unsticking) {
+      const float minimum_unstick_distance = 0.5;
+      float left_unstick_distance = abs(left_encoder.get_meters() - unstick_left_start_meters);
+      float right_unstick_distance = abs(right_encoder.get_meters() - unstick_right_start_meters);
+      logf("unsticking left: %0.4f right: %0.4f\n", left_unstick_distance, right_unstick_distance);
+      // considered unstuck when both motors have gone minimum_unstick_distance absolute
+      if ((left_unstick_distance > minimum_unstick_distance) && (right_unstick_distance > minimum_unstick_distance)) {
+        logf("unstuck\n");
+        unsticking = false;
+      } else {
+        left_motor.go(-1);
+        right_motor.go(-1);
+        return;
+      }
+    }
+
+    
+    // if you are blocked, go backward
+    if (left_stuck_checker.is_stuck() || right_stuck_checker.is_stuck()) {
+      unstick_left_start_meters = left_encoder.get_meters();
+      unstick_right_start_meters = right_encoder.get_meters();
+      left_motor.go(0);
+      right_motor.go(0);
+      unsticking = true;
+      return;
+    }
+    bool arrived = go_toward_lat_lon(route_waypoints[step], &meters_to_next_waypoint);
     if (arrived) {
       Serial.printf("arrived at waypoint %d ", step);
       step++;
@@ -682,22 +715,24 @@ void loop() {
 
   if (every_1000_ms) {
     HangChecker hc("encoders");
-    logf("Encoders left: %d,%d right: %d,%d ms: %d, %d",
-         left_encoder.odometer_a,
-         left_encoder.odometer_b,
-         right_encoder.odometer_a,
-         right_encoder.odometer_b,
-         left_encoder.odometer_ab_us,
-         right_encoder.odometer_ab_us);
+    // logf("Encoders left: %f (%d,%d) right: %f (%d,%d) ms: %d, %d",
+    //     left_encoder.get_meters(),
+    //     left_encoder.odometer_a,
+    //     left_encoder.odometer_b,
+    //     right_encoder.get_meters(),
+    //     right_encoder.odometer_a,
+    //     right_encoder.odometer_b,
+    //     left_encoder.odometer_ab_us,
+    //     right_encoder.odometer_ab_us);
 
     logf("meters traveled: %0.4f, %0.4f",
          left_encoder.odometer_a * meters_per_odometer_tick,
          right_encoder.odometer_a * meters_per_odometer_tick);
 
-    for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, process_crsf_byte_stats}) {
-      stats.to_log_msg(&log_msg);
-      log(log_msg);
-    }
+    // for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, process_crsf_byte_stats}) {
+    //   stats.to_log_msg(&log_msg);
+    //   log(log_msg);
+    // }
   }
 
   if (isnan(v_bat) || every_1000_ms) {
