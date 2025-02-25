@@ -603,10 +603,25 @@ bool load_compass_calibration_from_spiffs() {
 }
 
 void tof_measurement_callback(struct tmf882x_msg_meas_results *results) {
-  Serial.printf("%d - ", results->result_num);
+  int channels[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
   for(uint32_t i = 0; i < results->num_results; ++i) {
-    Serial.printf("%5dmm", results->results[i].distance_mm);
+    int channel = results->results[i].channel;
+    if(channel > 9) {
+      logf("channel %d out of range\n", channel);
+      continue;
+    }
+    int mm = results->results[i].distance_mm;
+    if (channels[channel] == 0) {
+      channels[channel] = mm;
+    } else {
+      channels[channel] = std::min(channels[channel], mm);
+    }
+
+    channels[results->results[i].channel -1 ] = results->results[i].distance_mm;
   }
+  Serial.printf("%3d %3d %3d\n", channels[0], channels[1], channels[2]);
+  Serial.printf("%3d %3d %3d\n", channels[3], channels[4], channels[5]);
+  Serial.printf("%3d %3d %3d\n", channels[6], channels[7], channels[8]);
   Serial.println();
 }
 
@@ -680,13 +695,11 @@ void setup() {
   }
 
   compass.init();
-  // compass._writeReg(0x0B,0x01);
-	// compass.setMode(0x01,0x0C,0x10,0X00);
-  // if (!load_compass_calibration_from_spiffs()) {
-  //   compass.setCalibration(-950, 675, -1510, 47, 0, 850);
-  // }
-  // // see https://www.magnetic-declination.com/
-  // compass.setMagneticDeclination(11, 24);
+  if (!load_compass_calibration_from_spiffs()) {
+    compass.setCalibration(-950, 675, -1510, 47, 0, 850);
+  }
+  // see https://www.magnetic-declination.com/
+  compass.setMagneticDeclination(11, 24);
 
   tof_sensor.setSampleDelay(1);
   if(!tof_sensor.begin(Wire1))
@@ -699,17 +712,24 @@ void setup() {
       Serial.println("TMF882X started.");
   }
 
-  tof_sensor.setMeasurementHandler(tof_measurement_callback);
-  const int ms_delay_between_samples = 1;
-  tof_sensor.setSampleDelay(ms_delay_between_samples); // this appears to do nothing
-  const int SAMPLE_TIMEOUT_MS = 1000;
-
-  // this works fine
-  // tof_sensor.async_startMeasuring();
-  // while(1) {
-  //   tof_sensor.async_updateMeasuring();
-  //   delay(100);
+  // see https://look.ams-osram.com/m/52236c476132a095/original/TMF8820-21-28-Multizone-Time-of-Flight-Sensor.pdf
+  // page 23
+  // and https://github.com/sparkfun/SparkFun_Qwiic_TMF882X_Arduino_Library/blob/main/docs/api_setup.md
+  // tmf882x_mode_app_config tofConfig;
+  // tof_sensor.getTMF882XConfig(tofConfig);
+  // tofConfig.spad_map_id = 10;
+  // if (!tof_sensor.setTMF882XConfig(tofConfig)){
+  //   while(true) {
+  //     Serial.println("Error - The TMF882X failed to set config");
+  //     delay(1000);
+  //   }
   // }
+
+
+
+
+  tof_sensor.setMeasurementHandler(tof_measurement_callback);
+
   // quadrature encoders
 
   attachInterrupt(digitalPinToInterrupt(pin_left_encoder_a), left_a_changed, CHANGE);
@@ -789,27 +809,13 @@ void loop() {
   bool every_1_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 1);
   bool every_10_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 10);
   bool every_100_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 100);
+  bool every_200_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 200);
   bool every_1000_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 1000);
 
-  if(every_100_ms) {
+  if(every_10_ms) {
     BlockTimer bt(tof_stats);
     tof_sensor.async_updateMeasuring();
-    delay(2);
   }
-
-  // if (every_10_ms) {
-  //   BlockTimer bt(gps_stats);
-  //   HangChecker hc("gps");
-  //   int available = gps_serial.available();
-  //   if (available > 3000) {
-  //     logf("gps buffer overflow: %d", available);
-  //     while (gps_serial.read() >= 0) {
-  //     }
-  //   }
-  //   while (gps_serial.available()) {
-  //     gps.encode(gps_serial.read());
-  //   }
-  // }
 
   if (every_10_ms) {
     BlockTimer bt(gps_stats);
@@ -817,7 +823,7 @@ void loop() {
     gnss.checkUblox();
   }
 
-  if (every_1000_ms) {
+  if (false && every_1000_ms) {
     HangChecker hc("encoders");
     // logf("Encoders left: %f (%d,%d) right: %f (%d,%d) ms: %d, %d",
     //     left_encoder.get_meters(),
