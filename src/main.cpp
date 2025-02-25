@@ -64,10 +64,10 @@ const int pin_left_fwd = 2;
 const int pin_left_rev = 3;
 const int pin_right_fwd = 4;
 const int pin_right_rev = 5;
-const int pin_compass_sda = 6;
-const int pin_compass_scl = 7;
 const int pin_test = 8;
 const int pin_battery_voltage = 9;
+const int pin_compass_sda = 11;
+const int pin_compass_scl = 12;
 
 const int pin_built_in_led = 15;
 
