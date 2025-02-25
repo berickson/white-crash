@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <QMC5883LCompass.h>
+#include "async_SparkFun_TMF882X_Library.h"
 #include <SPIFFS.h>
 #include <Wire.h>
 
@@ -64,10 +65,12 @@ const int pin_left_fwd = 2;
 const int pin_left_rev = 3;
 const int pin_right_fwd = 4;
 const int pin_right_rev = 5;
+const int pin_compass_sda = 18;
+const int pin_compass_scl = 21;
 const int pin_test = 8;
 const int pin_battery_voltage = 9;
-const int pin_compass_sda = 11;
-const int pin_compass_scl = 12;
+const int pin_tof_sda = 12;
+const int pin_tof_scl = 11;
 
 const int pin_built_in_led = 15;
 
@@ -89,6 +92,8 @@ HardwareSerial crsf_serial(0);
 HardwareSerial gps_serial(1);
 TinyGPSPlus gps;
 SFE_UBLOX_GNSS gnss;
+Async_SparkFun_TMF882X  tof_sensor;
+tmf882x_msg_meas_results tof_sensor_results;
 
 QMC5883LCompass compass;
 QuadratureEncoder left_encoder(pin_left_encoder_a, pin_left_encoder_b, meters_per_odometer_tick);
@@ -107,6 +112,7 @@ RunStatistics compass_stats("compass");
 RunStatistics telemetry_stats("telemetry");
 RunStatistics serial_read_stats("serial_read");
 RunStatistics process_crsf_byte_stats("process_crsf_byte");
+RunStatistics tof_stats("tof");
 
 StuckChecker left_stuck_checker;
 StuckChecker right_stuck_checker;
@@ -596,6 +602,36 @@ bool load_compass_calibration_from_spiffs() {
   return true;
 }
 
+void tof_measurement_callback(struct tmf882x_msg_meas_results *results) {
+  Serial.printf("%d - ", results->result_num);
+  for(uint32_t i = 0; i < results->num_results; ++i) {
+    Serial.printf("%5dmm", results->results[i].distance_mm);
+  }
+  Serial.println();
+}
+
+
+void print_tof_results(struct tmf882x_msg_meas_results *myResults)
+{
+
+    // print out results
+    Serial.println("Measurement:");
+    Serial.print("Result Number: "); Serial.print(myResults->result_num);
+    Serial.print(" Number of Results: "); Serial.println(myResults->num_results);       
+
+    for(int i = 0; i < myResults->num_results; ++i) 
+    {
+        Serial.print("    conf: "); Serial.print(myResults->results[i].confidence);
+        Serial.print(" distance mm: "); Serial.print(myResults->results[i].distance_mm);
+        Serial.print(" channel: "); Serial.print(myResults->results[i].channel);
+        Serial.print(" sub_capture: "); Serial.println(myResults->results[i].sub_capture);  
+
+    }
+    Serial.print(" photon: "); Serial.print(myResults->photon_count);   
+    Serial.print(" ref photon: "); Serial.print(myResults->ref_photon_count);
+    Serial.print(" ALS: "); Serial.println(myResults->ambient_light); Serial.println();
+
+}
 
 //////////////////////////////////
 // Main setup and loop
@@ -614,6 +650,13 @@ void setup() {
   Wire.setPins(pin_compass_sda, pin_compass_scl);
   Wire.begin();
   Wire.setTimeOut(5);
+
+  Wire1.setPins(pin_tof_sda, pin_tof_scl);
+  Wire1.begin();
+  Wire1.setTimeOut(5);
+
+
+
 
   fsm.begin();
 
@@ -637,12 +680,36 @@ void setup() {
   }
 
   compass.init();
-  if (!load_compass_calibration_from_spiffs()) {
-    compass.setCalibration(-950, 675, -1510, 47, 0, 850);
-  }
-  // see https://www.magnetic-declination.com/
-  compass.setMagneticDeclination(11, 24);
+  // compass._writeReg(0x0B,0x01);
+	// compass.setMode(0x01,0x0C,0x10,0X00);
+  // if (!load_compass_calibration_from_spiffs()) {
+  //   compass.setCalibration(-950, 675, -1510, 47, 0, 850);
+  // }
+  // // see https://www.magnetic-declination.com/
+  // compass.setMagneticDeclination(11, 24);
 
+  tof_sensor.setSampleDelay(1);
+  if(!tof_sensor.begin(Wire1))
+  {
+    while(1) {
+      Serial.println("Error - The TMF882X failed to initialize - is the board connected?");
+      delay(1000);
+    }
+  } else {
+      Serial.println("TMF882X started.");
+  }
+
+  tof_sensor.setMeasurementHandler(tof_measurement_callback);
+  const int ms_delay_between_samples = 1;
+  tof_sensor.setSampleDelay(ms_delay_between_samples); // this appears to do nothing
+  const int SAMPLE_TIMEOUT_MS = 1000;
+
+  // this works fine
+  // tof_sensor.async_startMeasuring();
+  // while(1) {
+  //   tof_sensor.async_updateMeasuring();
+  //   delay(100);
+  // }
   // quadrature encoders
 
   attachInterrupt(digitalPinToInterrupt(pin_left_encoder_a), left_a_changed, CHANGE);
@@ -679,6 +746,8 @@ void setup() {
   while(gps_serial.available()) {
     gps_serial.read();
   }
+
+  tof_sensor.async_startMeasuring();
   logf("%s", "*********************** setup complete ***********************");
 }
 
@@ -717,9 +786,16 @@ void loop() {
   last_loop_time_ms = loop_time_ms;
   loop_time_ms = millis();
 
+  bool every_1_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 1);
   bool every_10_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 10);
   bool every_100_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 100);
   bool every_1000_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 1000);
+
+  if(every_100_ms) {
+    BlockTimer bt(tof_stats);
+    tof_sensor.async_updateMeasuring();
+    delay(2);
+  }
 
   // if (every_10_ms) {
   //   BlockTimer bt(gps_stats);
@@ -764,7 +840,7 @@ void loop() {
          left_encoder.odometer_a * meters_per_odometer_tick,
          right_encoder.odometer_a * meters_per_odometer_tick);
 
-    for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, process_crsf_byte_stats}) {
+    for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, process_crsf_byte_stats, tof_stats}) {
       stats.to_log_msg(&log_msg);
       log(log_msg);
     }
@@ -851,10 +927,11 @@ void loop() {
     last_button_sc_pressed = button_sc_pressed;
   }
 
-  if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
+  if (every_100_ms) {
     BlockTimer bt(compass_stats);
     HangChecker hc("compass");
     compass.read();
+    delay(2);
 
     // update magnetometer limits
     static int min_x = std::numeric_limits<int>::max();

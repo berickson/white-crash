@@ -243,9 +243,10 @@ class Crsf {
     int available = crsf_serial.available();
     // read until buffer is empty
     if (available > 3000) {
-      logf("CRSF buffer overflow count:%d \n", available);
+      logf("CRSF buffer overflow, bytes count in buffer:%d \n", available);
       while(crsf_serial.read() != -1){
       }
+      logf("CRSF buffer overflow, buffer cleared, buffer has %d bytes \n", crsf_serial.available());
       serial_read_stats.stop();
       return;
     }
