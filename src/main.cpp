@@ -715,15 +715,15 @@ void setup() {
   // see https://look.ams-osram.com/m/52236c476132a095/original/TMF8820-21-28-Multizone-Time-of-Flight-Sensor.pdf
   // page 23
   // and https://github.com/sparkfun/SparkFun_Qwiic_TMF882X_Arduino_Library/blob/main/docs/api_setup.md
-  // tmf882x_mode_app_config tofConfig;
-  // tof_sensor.getTMF882XConfig(tofConfig);
-  // tofConfig.spad_map_id = 10;
-  // if (!tof_sensor.setTMF882XConfig(tofConfig)){
-  //   while(true) {
-  //     Serial.println("Error - The TMF882X failed to set config");
-  //     delay(1000);
-  //   }
-  // }
+  tmf882x_mode_app_config tofConfig;
+  tof_sensor.getTMF882XConfig(tofConfig);
+  tofConfig.spad_map_id = 6;
+  if (!tof_sensor.setTMF882XConfig(tofConfig)){
+    while(true) {
+      Serial.println("Error - The TMF882X failed to set config");
+      delay(1000);
+    }
+  }
 
 
 
