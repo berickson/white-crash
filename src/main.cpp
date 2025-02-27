@@ -62,10 +62,10 @@ const char *compass_calibration_file_path = "/compass_calibration.txt";
 //////////////////////////////////
 // pin assignments
 
-const int pin_left_fwd = 2;
-const int pin_left_rev = 3;
-const int pin_right_fwd = 4;
-const int pin_right_rev = 5;
+const int pin_left_rev = 2;
+const int pin_left_fwd = 3;
+const int pin_right_rev = 4;
+const int pin_right_fwd = 5;
 const int pin_compass_sda = 18;
 const int pin_compass_scl = 21;
 const int pin_test = 8;
@@ -75,10 +75,10 @@ const int pin_tof_scl = 11;
 
 const int pin_built_in_led = 15;
 
-const int pin_left_encoder_b = 33;
-const int pin_left_encoder_a = 34;
-const int pin_right_encoder_a = 35;
-const int pin_right_encoder_b = 36;
+const int pin_left_encoder_a = 33;
+const int pin_left_encoder_b = 34;
+const int pin_right_encoder_b = 35;
+const int pin_right_encoder_a = 36;
 const int pin_gps_rx = 37;
 const int pin_gps_tx = 38;
 const int pin_crsf_rx = 39;
