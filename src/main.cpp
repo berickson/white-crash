@@ -381,29 +381,10 @@ void update_motor_speeds() {
 }
 
 void update_compass_calibration(int min_x, int max_x, int min_y, int max_y, int min_z, int max_z) {
-  float avg_x = (max_x + min_x) / 2.0;
-  float avg_y = (max_y + min_y) / 2.0;
-  float avg_z = (max_z + min_z) / 2.0;
-  compass.setCalibrationOffsets(
-      avg_x,
-      avg_y,
-      avg_z);
 
-  float delta_x = max_x - min_x;
-  float delta_y = max_y - min_y;
-  float delta_avg = (delta_x + delta_y) / 2.0;
-
-  float scale_x = delta_avg / delta_x;
-  float scale_y = delta_avg / delta_y;
-  float scale_z = 1.0;
-
-  compass.setCalibrationScales(
-    scale_x, scale_y, scale_z);
-  
-  logf("updated compass calibration: %0.4f %0.4f %0.4f scale_x: %0.4f scale_y: %0.4f scale_z:\n", avg_x, avg_y, avg_z, scale_x, scale_y, scale_z);
-
+  compass.setCalibration(min_x, max_x, min_y, max_y, min_z, max_z);
+  logf("updated compass calibration to %d %d %d %d %d %d\n", min_x, max_x, min_y, max_y, min_z, max_z);
 }
-
 //////////////////////////////////
 // Finite state machine
 class HandMode : public Task {
@@ -430,6 +411,7 @@ class CalibrateCompassMode : public Task {
   virtual void begin() override {
     logf("calibrate compass mode\n");
     compass.clearCalibration();
+    compass.read(); // reading forces the calibration to apply
     min_x = min_y = min_z = std::numeric_limits<int>::max();
     max_x = max_y = max_z = std::numeric_limits<int>::min();
   }
@@ -961,14 +943,14 @@ void loop() {
     //       gps.sentencesWithFix()
     //     );
 
-    logf("meters traveled: %0.4f, %0.4f",
-         left_encoder.odometer_a * meters_per_odometer_tick,
-         right_encoder.odometer_a * meters_per_odometer_tick);
+    // logf("meters traveled: %0.4f, %0.4f",
+    //      left_encoder.odometer_a * meters_per_odometer_tick,
+    //      right_encoder.odometer_a * meters_per_odometer_tick);
 
-    for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, process_crsf_byte_stats, tof_stats}) {
-      stats.to_log_msg(&log_msg);
-      log(log_msg);
-    }
+    // for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, process_crsf_byte_stats, tof_stats}) {
+    //   stats.to_log_msg(&log_msg);
+    //   log(log_msg);
+    // }
   }
 
   if (isnan(v_bat) || every_1000_ms) {
@@ -979,7 +961,14 @@ void loop() {
     for (int i = 0; i < sample_count; i++) {
       sum += analogRead(pin_battery_voltage);
     }
-    v_bat = 0.003714 * sum  / sample_count;
+
+
+    // const float v_bat_scale = 0.003714; // white-crash s
+    const float v_bat_scale = 0.0077578; // white-crash m
+  
+
+    
+    v_bat = v_bat_scale * sum  / sample_count;
 
     battery_msg.data = v_bat;
   }
@@ -1059,29 +1048,13 @@ void loop() {
     delay(2);
 
     // update magnetometer limits
-    static int min_x = std::numeric_limits<int>::max();
-    static int min_y = std::numeric_limits<int>::max();
-    static int min_z = std::numeric_limits<int>::max();
-    static int max_x = std::numeric_limits<int>::min();
-    static int max_y = std::numeric_limits<int>::min();
-    static int max_z = std::numeric_limits<int>::min();
-
     int x = compass.getX();
     int y = compass.getY();
     int z = compass.getZ();
 
-    if (x < min_x) min_x = x;
-    if (y < min_y) min_y = y;
-    if (z < min_z) min_z = z;
-    if (x > max_x) max_x = x;
-    if (y > max_y) max_y = y;
-    if (z > max_z) max_z = z;
-
-    // Serial.printf("compass: %d [%d, %d, %d] limits (%d, %d, %d, %d %d %d)\n",
-    //   compass.getAzimuth(),
-    //   compass.getX(), compass.getY(), compass.getZ(),
-    //   min_x, max_x, min_y, max_y, min_z, max_z
-    // );
+    Serial.printf("compass: %d [%d, %d, %d]\n",
+      compass.getAzimuth(),
+      compass.getX(), compass.getY(), compass.getZ()    );
   }
 
   // blink for a few ms every second to show signs of life
