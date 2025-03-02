@@ -31,7 +31,8 @@
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h> // https://github.com/sparkfun/SparkFun_Ublox_Arduino_Library
 
 // calibration constants
-float meters_per_odometer_tick = 0.00008204;
+//float meters_per_odometer_tick = 0.00008204; // S
+float meters_per_odometer_tick = 0.00065136; // M
 
 // hard code some interesting gps locations
 class lat_lon {
@@ -298,9 +299,12 @@ bool go_toward_lat_lon(lat_lon destination, float * meters_to_next_waypoint) {
     return true;
   }
 
+  float compass_mounting_angle_degrees = 0.0; // m
+  // float compass_mounting_angle_degrees = 180.0; // s
+
   // subtract courseTo from 360 to get postive ccw
   double desired_bearing_degrees = 360. - gps.courseTo(gnss_lat, gnss_lon, destination.lat, destination.lon);
-  double current_heading_degrees = compass.getAzimuth() + 180.0; // chip is mounted 180 degrees off
+  double current_heading_degrees = compass.getAzimuth() + compass_mounting_angle_degrees; // chip is mounted 180 degrees off
 
   double heading_error = desired_bearing_degrees - current_heading_degrees;
   while (heading_error > 180) {
@@ -926,15 +930,15 @@ void loop() {
 
   if (every_1000_ms) {
     HangChecker hc("encoders");
-    // logf("Encoders left: %f (%d,%d) right: %f (%d,%d) ms: %d, %d",
-    //     left_encoder.get_meters(),
-    //     left_encoder.odometer_a,
-    //     left_encoder.odometer_b,
-    //     right_encoder.get_meters(),
-    //     right_encoder.odometer_a,
-    //     right_encoder.odometer_b,
-    //     left_encoder.odometer_ab_us,
-    //     right_encoder.odometer_ab_us);
+    logf("Encoders left: %fm (%d,%d) right: %fm (%d,%d) ms: %d, %d",
+        left_encoder.get_meters(),
+        left_encoder.odometer_a,
+        left_encoder.odometer_b,
+        right_encoder.get_meters(),
+        right_encoder.odometer_a,
+        right_encoder.odometer_b,
+        left_encoder.odometer_ab_us,
+        right_encoder.odometer_ab_us);
 
     // logf("Gps Checksums passed: %d failed: %d chars: %d sentences: %d",
     //       gps.passedChecksum(),
