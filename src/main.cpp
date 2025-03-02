@@ -25,6 +25,8 @@
 #include "StuckChecker.h"
 #include "secrets/wifi_login.h"
 
+#define has_tof 0
+
 
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h> // https://github.com/sparkfun/SparkFun_Ublox_Arduino_Library
 
@@ -69,11 +71,11 @@ const int pin_left_fwd = 5;
 const int pin_compass_sda = 18;
 const int pin_compass_scl = 21;
 const int pin_test = 8;
-const int pin_battery_voltage = 9;
 const int pin_tof_sda = 12;
 const int pin_tof_scl = 11;
 
 const int pin_built_in_led = 15;
+const int pin_battery_voltage = 16;
 
 const int pin_right_encoder_a = 33;
 const int pin_right_encoder_b = 34;
@@ -93,8 +95,10 @@ HardwareSerial crsf_serial(0);
 HardwareSerial gps_serial(1);
 TinyGPSPlus gps;
 SFE_UBLOX_GNSS gnss;
+#if has_tof
 Async_SparkFun_TMF882X  tof_sensor;
 tmf882x_msg_meas_results tof_sensor_results;
+#endif
 
 QMC5883LCompass compass;
 QuadratureEncoder left_encoder(pin_left_encoder_a, pin_left_encoder_b, meters_per_odometer_tick);
@@ -104,6 +108,8 @@ int rx_str = 0;
 int rx_esc = 0;
 int rx_aux = 0;
 bool button_sc_pressed = false;
+double v_bat = NAN;
+
 
 RunStatistics gps_stats("gps");
 RunStatistics log_stats("logf");
@@ -200,7 +206,7 @@ void setup_micro_ros() {
   char *psk = const_cast<char *>(wifi_password);
 
   set_microros_wifi_transports(ssid, psk, agent_ip, agent_port);
-  delay(2000);
+  // delay(2000);
 
   allocator = rcl_get_default_allocator();
 
@@ -294,7 +300,7 @@ bool go_toward_lat_lon(lat_lon destination, float * meters_to_next_waypoint) {
 
   // subtract courseTo from 360 to get postive ccw
   double desired_bearing_degrees = 360. - gps.courseTo(gnss_lat, gnss_lon, destination.lat, destination.lon);
-  double current_heading_degrees = compass.getAzimuth();
+  double current_heading_degrees = compass.getAzimuth() + 180.0; // chip is mounted 180 degrees off
 
   double heading_error = desired_bearing_degrees - current_heading_degrees;
   while (heading_error > 180) {
@@ -585,7 +591,7 @@ Fsm fsm(tasks, edges);
 
 void ros_thread(void *arg) {
   while (true) {
-    // RCSOFTCHECK(rcl_publish(&battery_publisher, &battery_msg, NULL));
+    RCSOFTCHECK(rcl_publish(&battery_publisher, &battery_msg, NULL));
     delay(1000);
   }
 }
@@ -725,6 +731,8 @@ void tof_measurement_callback(struct tmf882x_msg_meas_results *results) {
 // Main setup and loop
 
 void setup() {
+  pinMode(pin_built_in_led, OUTPUT);
+  digitalWrite(pin_built_in_led, HIGH);
   Serial.begin(115200);
 
   SPIFFS.begin();
@@ -774,6 +782,7 @@ void setup() {
   // see https://www.magnetic-declination.com/
   compass.setMagneticDeclination(11, 24);
 
+  #if has_tof
   tof_sensor.setSampleDelay(1);
   if(!tof_sensor.begin(Wire1))
   {
@@ -784,6 +793,7 @@ void setup() {
   } else {
       Serial.println("TMF882X started.");
   }
+  #endif
 
   // see https://look.ams-osram.com/m/52236c476132a095/original/TMF8820-21-28-Multizone-Time-of-Flight-Sensor.pdf
   // page 23
@@ -797,7 +807,7 @@ void setup() {
   //     delay(1000);
   //   }
   // }
-
+  #if 0
   const spad_mode_info &spad_mode = spad_mode_6;
   while (!tof_sensor.setCurrentSPADMap(spad_mode.id)) {
     Serial.println("Error - The TMF882X failed to set SPAD map");
@@ -807,6 +817,7 @@ void setup() {
   tof_spad_columns = spad_mode.columns;
 
   tof_sensor.setMeasurementHandler(tof_measurement_callback);
+  #endif
 
   // quadrature encoders
 
@@ -828,7 +839,7 @@ void setup() {
   pinMode(pin_battery_voltage, INPUT);
 
   // create a thread for ros stuff
-  if (0) xTaskCreatePinnedToCore(
+  xTaskCreatePinnedToCore(
       ros_thread,
       "ros_thread",
       8192,
@@ -838,18 +849,23 @@ void setup() {
       1);
 
   // reset all serial data
+  crsf_serial.flush();
+  gps_serial.flush();
+  /*
   while(crsf_serial.available()) {
     crsf_serial.read();
   }
   while(gps_serial.available()) {
     gps_serial.read();
   }
-
+    */
+  #if has_tof
   tof_sensor.async_startMeasuring();
   logf("%s", "*********************** setup complete ***********************");
+  #endif
+  digitalWrite(pin_built_in_led, 0);
 }
 
-double v_bat = NAN;
 
 class HangChecker {
  public:
@@ -879,6 +895,29 @@ class HangChecker {
   }
 };
 
+uint8_t estimate_lipo_battery_percent_from_voltage(float v) {
+  // https://www.rchelicopterfun.com/rc-lipo-batteries.html
+  // 4.2v = 100%
+  // 3.7v = 50%
+  // 3.3v = 20%
+  // 3.0v = 0%
+
+  // guess the number of cells
+  int num_cells = v < 4.4  ? 1 : (v < 9 ? 2 : 3);
+
+  float v_per_cell = v / num_cells;
+
+
+  if (v_per_cell > 4.1) {
+    return 100;
+  } else if (v_per_cell < 3.5) {
+    return 0;
+  } else {
+    return 100 * (v_per_cell - 3.5) / (4.1 - 3.5);
+  }
+
+}
+
 void loop() {
   BlockTimer bt(loop_stats);
   last_loop_time_ms = loop_time_ms;
@@ -890,10 +929,12 @@ void loop() {
   bool every_200_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 200);
   bool every_1000_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 1000);
 
+  #if has_tof
   if(every_100_ms) {
     BlockTimer bt(tof_stats);
     tof_sensor.async_updateMeasuring();
   }
+  #endif
 
   if (every_10_ms) {
     BlockTimer bt(gps_stats);
@@ -901,7 +942,7 @@ void loop() {
     gnss.checkUblox();
   }
 
-  if (false && every_1000_ms) {
+  if (every_1000_ms) {
     HangChecker hc("encoders");
     // logf("Encoders left: %f (%d,%d) right: %f (%d,%d) ms: %d, %d",
     //     left_encoder.get_meters(),
@@ -938,7 +979,7 @@ void loop() {
     for (int i = 0; i < sample_count; i++) {
       sum += analogRead(pin_battery_voltage);
     }
-    v_bat = 8.4 * sum / 36823. * 16 / sample_count;
+    v_bat = 0.003714 * sum  / sample_count;
 
     battery_msg.data = v_bat;
   }
@@ -1062,7 +1103,10 @@ void loop() {
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 200)) {
     BlockTimer bt(telemetry_stats);
     HangChecker hc("telemetry");
-    crsf.send_battery(v_bat, 0, 0, 0);
+
+    uint8_t percent = estimate_lipo_battery_percent_from_voltage(v_bat);
+
+    crsf.send_battery(v_bat, 0, 0, percent);
     char display_string[16];
     fsm.current_task->get_display_string(display_string, 16);
     crsf.send_flight_mode(display_string);
