@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <QMC5883LCompass.h>
+#include <VL53L1X.h>
 #include "async_SparkFun_TMF882X_Library.h"
 #include <SPIFFS.h>
 #include <Wire.h>
@@ -101,6 +102,9 @@ SFE_UBLOX_GNSS gnss;
 Async_SparkFun_TMF882X  tof_sensor;
 tmf882x_msg_meas_results tof_sensor_results;
 #endif
+VL53L1X tof_distance_sensor;
+uint32_t tof_distance_sensor_timing_budget_ms = 20;
+float tof_distance = std::numeric_limits<float>::quiet_NaN();
 
 QMC5883LCompass compass;
 QuadratureEncoder left_encoder(pin_left_encoder_a, pin_left_encoder_b, meters_per_odometer_tick);
@@ -125,6 +129,7 @@ RunStatistics telemetry_stats("telemetry");
 RunStatistics serial_read_stats("serial_read");
 RunStatistics process_crsf_byte_stats("process_crsf_byte");
 RunStatistics tof_stats("tof");
+RunStatistics tof_distance_stats("tof_distance");
 
 StuckChecker left_stuck_checker;
 StuckChecker right_stuck_checker;
@@ -783,6 +788,31 @@ void setup() {
   // see https://www.magnetic-declination.com/
   compass.setMagneticDeclination(11, 24);
 
+
+  while (!tof_distance_sensor.init()) {
+    Serial.println("Failed to detect and initialize VL53L1X distance sensor!");
+    delay(1000);
+  }
+  // tof_distance_sensor.setAddress(0x45);
+
+    /*
+  The VL53L1X has three distance modes (DM): short, medium, and long.
+  Long distance mode allows the longest possible ranging distance of 4 m to be reached. However, this maximum
+  ranging distance is impacted by ambient light.
+  Short distance mode is more immune to ambient light, but its maximum ranging distance is typically limited to 1.3m.
+  */
+ tof_distance_sensor.setDistanceMode(VL53L1X::Short);
+
+ /*
+ 20 ms is the minimum timing budget and can be used only in short distance mode.
+ 33 ms is the minimum timing budget which can work for all distance modes.
+ 140 ms is the timing budget which allows the maximum distance of 4 m (in the dark on a white chart) to be reached with long distance mode
+ */
+ tof_distance_sensor.setMeasurementTimingBudget(tof_distance_sensor_timing_budget_ms * 1000);
+ tof_distance_sensor.readSingle(false); // start first measurement, false means async
+
+
+
   #if has_tof
   tof_sensor.setSampleDelay(1);
   if(!tof_sensor.begin(Wire1))
@@ -949,6 +979,23 @@ void loop() {
     // );
   }
 
+  // tof distance - you need to wait 3ms longer than the 
+  if (every_n_ms(last_loop_time_ms, loop_time_ms, tof_distance_sensor_timing_budget_ms + 3)) {
+    Serial.print(".");
+    BlockTimer bt(tof_distance_stats);
+    tof_distance_sensor.readSingle(true); // read pending measurement
+    
+
+    if (tof_distance_sensor.ranging_data.range_status == VL53L1X::RangeValid) {
+      tof_distance = tof_distance_sensor.ranging_data.range_mm / 1000.0;
+
+    } else {
+      tof_distance = std::numeric_limits<float>::quiet_NaN();
+    }
+    tof_distance_sensor.readSingle(false); // start next measurement
+    Serial.printf("ms: %5d tof distance mm: %0.3f\n",loop_time_ms, tof_distance);
+  }
+
   if (every_10_ms) {
     BlockTimer bt(gps_stats);
     HangChecker hc("gps");
@@ -1083,9 +1130,9 @@ void loop() {
     int y = compass.getY();
     int z = compass.getZ();
 
-    Serial.printf("compass: %d [%d, %d, %d]\n",
-      compass.getAzimuth(),
-      compass.getX(), compass.getY(), compass.getZ()    );
+    // Serial.printf("compass: %d [%d, %d, %d]\n",
+    //   compass.getAzimuth(),
+    //   compass.getX(), compass.getY(), compass.getZ()    );
   }
 
   // blink for a few ms every second to show signs of life
