@@ -809,7 +809,8 @@ void setup() {
  140 ms is the timing budget which allows the maximum distance of 4 m (in the dark on a white chart) to be reached with long distance mode
  */
  tof_distance_sensor.setMeasurementTimingBudget(tof_distance_sensor_timing_budget_ms * 1000);
- tof_distance_sensor.readSingle(false); // start first measurement, false means async
+ tof_distance_sensor.setTimeout(2); // timeout ms for synchronous measurements
+ tof_distance_sensor.startContinuous(tof_distance_sensor_timing_budget_ms); // start continuous measurements, false means async
 
 
 
@@ -980,20 +981,22 @@ void loop() {
   }
 
   // tof distance - you need to wait 3ms longer than the 
-  if (every_n_ms(last_loop_time_ms, loop_time_ms, tof_distance_sensor_timing_budget_ms + 3)) {
+  if (every_n_ms(last_loop_time_ms, loop_time_ms, tof_distance_sensor_timing_budget_ms + 10)) {
     Serial.print(".");
-    BlockTimer bt(tof_distance_stats);
-    tof_distance_sensor.readSingle(true); // read pending measurement
-    
+    {
+      BlockTimer bt(tof_distance_stats);
+      tof_distance_sensor.read(true); // read pending measurement
+      
 
-    if (tof_distance_sensor.ranging_data.range_status == VL53L1X::RangeValid) {
-      tof_distance = tof_distance_sensor.ranging_data.range_mm / 1000.0;
+      if (tof_distance_sensor.ranging_data.range_status == VL53L1X::RangeValid) {
+        tof_distance = tof_distance_sensor.ranging_data.range_mm / 1000.0;
 
-    } else {
-      tof_distance = std::numeric_limits<float>::quiet_NaN();
+      } else {
+        tof_distance = std::numeric_limits<float>::quiet_NaN();
+      }
     }
-    tof_distance_sensor.readSingle(false); // start next measurement
-    Serial.printf("ms: %5d tof distance mm: %0.3f\n",loop_time_ms, tof_distance);
+      // tof_distance_sensor.readSingle(false); // start next measurement
+    logf("s: %5.2f tof distance m: %0.3f\n",loop_time_ms/1000., tof_distance);
   }
 
   if (every_10_ms) {
@@ -1002,7 +1005,7 @@ void loop() {
     gnss.checkUblox();
   }
 
-  if (0 && every_1000_ms) {
+  if (every_1000_ms) {
     HangChecker hc("encoders");
     logf("Encoders left: %fm (%d,%d) right: %fm (%d,%d) ms: %d, %d",
         left_encoder.get_meters(),
@@ -1025,10 +1028,10 @@ void loop() {
     //      left_encoder.odometer_a * meters_per_odometer_tick,
     //      right_encoder.odometer_a * meters_per_odometer_tick);
 
-    // for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, process_crsf_byte_stats, tof_stats}) {
-    //   stats.to_log_msg(&log_msg);
-    //   log(log_msg);
-    // }
+    for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, process_crsf_byte_stats, tof_distance_stats}) {
+      stats.to_log_msg(&log_msg);
+      log(log_msg);
+    }
   }
 
   if (isnan(v_bat) || every_1000_ms) {
