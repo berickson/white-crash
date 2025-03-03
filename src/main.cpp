@@ -11,6 +11,7 @@
 #include "TinyGPS++.h"
 #include "drv8833.h"
 #include "quadrature_encoder.h"
+#include "speedometer.h"
 
 // micro ros
 #include <micro_ros_platformio.h>
@@ -104,6 +105,9 @@ tmf882x_msg_meas_results tof_sensor_results;
 QMC5883LCompass compass;
 QuadratureEncoder left_encoder(pin_left_encoder_a, pin_left_encoder_b, meters_per_odometer_tick);
 QuadratureEncoder right_encoder(pin_right_encoder_a, pin_right_encoder_b, meters_per_odometer_tick);
+
+Speedometer left_speedometer;
+Speedometer right_speedometer;
 
 int rx_str = 0;
 int rx_esc = 0;
@@ -274,6 +278,7 @@ void handle_rc_message(crsf_ns::RcData &rc_data) {
 
 unsigned long last_loop_time_ms = 0;
 unsigned long loop_time_ms = 0;
+
 // returns true if loop time passes through n ms boundary
 bool every_n_ms(unsigned long last_loop_ms, unsigned long loop_ms, unsigned long ms) {
   return (last_loop_ms % ms) + (loop_ms - last_loop_ms) >= ms;
@@ -282,6 +287,10 @@ bool every_n_ms(unsigned long last_loop_ms, unsigned long loop_ms, unsigned long
 // sets motor speeds to go to a lat/lon
 // returns true if arrived
 bool go_toward_lat_lon(lat_lon destination, float * meters_to_next_waypoint) {
+
+  const float max_speed = 0.5;
+
+
   if (gnss.getGnssFixOk() == 0) {
     left_motor.go(0);
     right_motor.go(0);
@@ -320,18 +329,18 @@ bool go_toward_lat_lon(lat_lon destination, float * meters_to_next_waypoint) {
 
   if (heading_error < -20) {
     // turn left
-    left_motor_speed = 0.7;
-    right_motor_speed = 1.0;
+    left_motor_speed = 0.7 * max_speed;
+    right_motor_speed = max_speed;
     direction = "left";
   } else if (heading_error > 20) {
     // turn right
-    left_motor_speed = 1.0;
-    right_motor_speed = 0.7;
+    left_motor_speed = max_speed;
+    right_motor_speed = 0.7 * max_speed;
     direction = "left";
   } else {
     // go straight
-    left_motor_speed = 1.0;
-    right_motor_speed = 1.0;
+    left_motor_speed = max_speed;
+    right_motor_speed = max_speed;
     direction = "straight";
   }
 
@@ -339,8 +348,10 @@ bool go_toward_lat_lon(lat_lon destination, float * meters_to_next_waypoint) {
   left_motor.go(left_motor_speed);
   right_motor.go(right_motor_speed);
 
-  if (every_n_ms(last_loop_time_ms, loop_time_ms, 1000)) {
-    logf("destination: %f %f direction: %s, distance_remaining: %0.4f, desired_bearing_degrees: %0.4f current_heading_degrees: %0.4f heading_error: %0.4f\n",
+  if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
+    logf("speed: %f, %f destination: %f %f direction: %s, distance_remaining: %0.4f, desired_bearing_degrees: %0.4f current_heading_degrees: %0.4f heading_error: %0.4f\n",
+         left_motor_speed,
+         right_motor_speed, 
          destination.lat,
          destination.lon,
          direction.c_str(),
@@ -737,6 +748,10 @@ void setup() {
   Wire1.begin();
   Wire1.setTimeOut(5);
 
+  left_speedometer.meters_per_tick = meters_per_odometer_tick;
+  right_speedometer.meters_per_tick = meters_per_odometer_tick;
+
+
 
 
 
@@ -923,12 +938,24 @@ void loop() {
   #endif
 
   if (every_10_ms) {
+    left_speedometer.update_from_sensor(micros(), left_encoder.odometer_a, left_encoder.last_odometer_a_us, left_encoder.odometer_b, left_encoder.last_odometer_b_us);
+    right_speedometer.update_from_sensor(micros(), right_encoder.odometer_a, right_encoder.last_odometer_a_us, right_encoder.odometer_b, right_encoder.last_odometer_b_us);
+    // logf("v_bat: %3.2f (%%,v): left (%0.2f, %0.2f) right (%0.2f, %0.2f)", 
+    //   v_bat,
+    //   left_motor.get_setpoint(),
+    //   left_speedometer.get_velocity(),
+    //   right_motor.get_setpoint(), 
+    //   right_speedometer.get_velocity()
+    // );
+  }
+
+  if (every_10_ms) {
     BlockTimer bt(gps_stats);
     HangChecker hc("gps");
     gnss.checkUblox();
   }
 
-  if (every_1000_ms) {
+  if (0 && every_1000_ms) {
     HangChecker hc("encoders");
     logf("Encoders left: %fm (%d,%d) right: %fm (%d,%d) ms: %d, %d",
         left_encoder.get_meters(),

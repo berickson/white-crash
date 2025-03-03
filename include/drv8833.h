@@ -25,7 +25,7 @@ class DRV8833 {
 
         // rate is [-1.0,1.0], fast_decay will cause faster
         // deceleration
-        void go(float rate, bool fast_decay = true) {
+        void go(float rate, bool fast_decay = false) {
             setpoint = rate;
             pinMode(pin_fwd, OUTPUT);
             pinMode(pin_rev, OUTPUT);
