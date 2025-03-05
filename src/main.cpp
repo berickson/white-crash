@@ -22,6 +22,7 @@
 #include <std_msgs/msg/float32.h>
 #include <std_msgs/msg/int32.h>
 #include <std_msgs/msg/string.h>
+#include <sensor_msgs/msg/range.h>
 
 #include "RunStatistics.h"
 #include "StuckChecker.h"
@@ -71,14 +72,19 @@ const int pin_right_rev = 2;
 const int pin_right_fwd = 3;
 const int pin_left_rev = 4;
 const int pin_left_fwd = 5;
+
+const int pin_left_tof_power = 6;
+const int pin_right_tof_power = 7;
+
 const int pin_compass_sda = 18;
 const int pin_compass_scl = 21;
 const int pin_test = 8;
-const int pin_tof_sda = 12;
-const int pin_tof_scl = 11;
+const int pin_tof_sda = 16;
+const int pin_tof_scl = 17;
 
 const int pin_built_in_led = 15;
-const int pin_battery_voltage = 16;
+const int pin_battery_voltage = 14;
+
 
 const int pin_right_encoder_a = 33;
 const int pin_right_encoder_b = 34;
@@ -90,20 +96,49 @@ const int pin_crsf_rx = 39;
 const int pin_crsf_tx = 40;
 
 //////////////////////////////////
+// i2c addresses
+const uint8_t left_tof_i2c_address = 0x14;
+const uint8_t right_tof_i2c_address = 0x15;
+
+//////////////////////////////////
 // Globals
 
 DRV8833 left_motor;
 DRV8833 right_motor;
 HardwareSerial crsf_serial(0);
 HardwareSerial gps_serial(1);
-TinyGPSPlus gps;
+TinyGPSPlus gps;  // currently only used for distanceBetween and courseTo
 SFE_UBLOX_GNSS gnss;
 #if has_tof
 Async_SparkFun_TMF882X  tof_sensor;
 tmf882x_msg_meas_results tof_sensor_results;
 #endif
-VL53L1X tof_distance_sensor;
-uint32_t tof_distance_sensor_timing_budget_ms = 20;
+VL53L1X left_tof_distance_sensor_raw;
+VL53L1X right_tof_distance_sensor_raw;
+
+struct TofSensor{
+  TofSensor(const char * name, VL53L1X * tof_sensor, int power_pin, uint8_t i2c_address) : sensor(tof_sensor), power_pin(power_pin), i2c_address(i2c_address) {
+    strncpy(this->name, name, sizeof(this->name));
+  }
+  VL53L1X * sensor;
+  int power_pin;
+  uint8_t i2c_address;
+  float distance  = NAN;
+  bool running = false;
+  rcl_publisher_t publisher;
+  char name[20];
+  uint32_t turn_off_ms = 0;
+
+};
+TofSensor left_tof_sensor("left",&left_tof_distance_sensor_raw, pin_left_tof_power, left_tof_i2c_address);
+TofSensor right_tof_sensor = {"right",&right_tof_distance_sensor_raw, pin_right_tof_power, right_tof_i2c_address};
+
+std::vector<TofSensor * > tof_sensors = {
+  &left_tof_sensor,
+  &right_tof_sensor};
+
+
+uint32_t tof_distance_sensor_timing_budget_ms = 50;
 float tof_distance = std::numeric_limits<float>::quiet_NaN();
 
 QMC5883LCompass compass;
@@ -127,7 +162,7 @@ RunStatistics crsf_stats("crsf");
 RunStatistics compass_stats("compass");
 RunStatistics telemetry_stats("telemetry");
 RunStatistics serial_read_stats("serial_read");
-RunStatistics process_crsf_byte_stats("process_crsf_byte");
+RunStatistics crsf_parse_stats("crsf_parse");
 RunStatistics tof_stats("tof");
 RunStatistics tof_distance_stats("tof_distance");
 
@@ -166,6 +201,7 @@ uint8_t tof_spad_columns;
 
 rcl_publisher_t log_publisher;
 rcl_publisher_t battery_publisher;
+sensor_msgs__msg__Range tof_distance_msg;
 std_msgs__msg__String log_msg;
 std_msgs__msg__Float32 battery_msg;
 
@@ -215,10 +251,17 @@ void setup_micro_ros() {
   char *ssid = const_cast<char *>(wifi_ssid);
   char *psk = const_cast<char *>(wifi_password);
 
+  
   set_microros_wifi_transports(ssid, psk, agent_ip, agent_port);
+  // checkto see if we can connect to the agent
+
+
   // delay(2000);
+  // uint32_t timeout_ms = 1000;
+  // rmw_uros_sync_session(timeout_ms);
 
   allocator = rcl_get_default_allocator();
+  configTime(0, 0, "pool.ntp.org");
 
   // create init_options
   RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
@@ -239,6 +282,16 @@ void setup_micro_ros() {
       &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
       "/tank/battery"));
+  
+  for (auto tof : tof_sensors) {
+    char topic[30];
+    snprintf(topic, sizeof(topic), "/tank/%s_distance", tof->name);
+    RCCHECK(rclc_publisher_init_best_effort(
+        &tof->publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
+        topic));
+  }
 
   Serial.printf("micro ros initialized\n");
 }
@@ -726,8 +779,43 @@ void tof_measurement_callback(struct tmf882x_msg_meas_results *results) {
 //  Serial.println();
 }
 
+void start_tof_distance_sensor(TofSensor & tof) {
+  pinMode(tof.power_pin, OUTPUT);
+  digitalWrite(tof.power_pin, HIGH);
+  tof.sensor->setBus(&Wire1);
+  bool use_2v8 = false;
+  delay(50);
+  while (!tof.sensor->init(use_2v8)) {
+    Serial.println("Failed to detect and initialize VL53L1X distance sensor!");
+    delay(50);
+  }
+  Serial.printf("VL53L1X %s sensor initialized\n", tof.name);
+  tof.sensor->setAddress(tof.i2c_address);
 
+  /*
+  The VL53L1X has three distance modes (DM): short, medium, and long.
+  Long distance mode allows the longest possible ranging distance of 4 m to be reached. However, this maximum
+  ranging distance is impacted by ambient light.
+  Short distance mode is more immune to ambient light, but its maximum ranging distance is typically limited to 1.3m.
+  */
+  tof.sensor->setDistanceMode(VL53L1X::Short);
 
+  /*
+  20 ms is the minimum timing budget and can be used only in short distance mode.
+  33 ms is the minimum timing budget which can work for all distance modes.
+  140 ms is the timing budget which allows the maximum distance of 4 m (in the dark on a white chart) to be reached with long distance mode
+  */
+  tof.sensor->setMeasurementTimingBudget(tof_distance_sensor_timing_budget_ms * 1000);
+  tof.sensor->setTimeout(2);  // timeout ms for synchronous measurements
+  tof.sensor->startContinuous(2 * tof_distance_sensor_timing_budget_ms);
+  tof.running = true;
+}
+
+void turn_off_tof_distance_sensor(TofSensor & tof) {
+  digitalWrite(tof.power_pin, LOW);
+  tof.running = false;
+  tof.turn_off_ms = millis();
+}
 
 //////////////////////////////////
 // Main setup and loop
@@ -745,13 +833,21 @@ void setup() {
   log_msg.data.size = 0;
   setup_micro_ros();
 
+  tof_distance_msg.header.frame_id.data = const_cast<char *>("tof");
+  tof_distance_msg.header.frame_id.size = 3;
+  tof_distance_msg.header.frame_id.capacity = 3;
+  tof_distance_msg.min_range = 0.03;
+  tof_distance_msg.max_range = 1.0;
+  tof_distance_msg.radiation_type = sensor_msgs__msg__Range__INFRARED;
+  tof_distance_msg.field_of_view = 27 * M_PI / 180; // 27 degrees
+
   Wire.setPins(pin_compass_sda, pin_compass_scl);
   Wire.begin();
-  Wire.setTimeOut(5);
+  Wire.setTimeOut(5); // ms
 
   Wire1.setPins(pin_tof_sda, pin_tof_scl);
   Wire1.begin();
-  Wire1.setTimeOut(5);
+  Wire1.setTimeOut(5); // ms
 
   left_speedometer.meters_per_tick = meters_per_odometer_tick;
   right_speedometer.meters_per_tick = meters_per_odometer_tick;
@@ -770,16 +866,18 @@ void setup() {
 
   //delay(10000); /// just wait for serial monitor to open
 
-  if (gnss.begin(gps_serial)) {
-    bool implicit_update = false;
-    bool assume_auto = true;
-    gnss.assumeAutoPVT(assume_auto, implicit_update);
-    gnss.setNavigationFrequency(4);
-    gnss.setUART2Output(COM_TYPE_UBX);
-    Serial.printf("GPS started\n");
-  } else {
-    Serial.printf("GPS failed to start\n");
-  }
+  gnss.enableDebugging(Serial, true);
+  for(int i = 0; i < 2; ++i) {
+    //gnss.factoryReset();
+    delay(1000);
+    if (gnss.begin(gps_serial)) {
+      Serial.printf("GPS started\n");
+      break;
+    }
+    Serial.printf("GPS failed to start, retrying\n");
+    delay(1000);
+  } 
+
 
   compass.init();
   if (!load_compass_calibration_from_spiffs()) {
@@ -788,29 +886,12 @@ void setup() {
   // see https://www.magnetic-declination.com/
   compass.setMagneticDeclination(11, 24);
 
+  start_tof_distance_sensor(left_tof_sensor);
+  start_tof_distance_sensor(right_tof_sensor);
 
-  while (!tof_distance_sensor.init()) {
-    Serial.println("Failed to detect and initialize VL53L1X distance sensor!");
-    delay(1000);
-  }
-  // tof_distance_sensor.setAddress(0x45);
 
-    /*
-  The VL53L1X has three distance modes (DM): short, medium, and long.
-  Long distance mode allows the longest possible ranging distance of 4 m to be reached. However, this maximum
-  ranging distance is impacted by ambient light.
-  Short distance mode is more immune to ambient light, but its maximum ranging distance is typically limited to 1.3m.
-  */
- tof_distance_sensor.setDistanceMode(VL53L1X::Short);
 
- /*
- 20 ms is the minimum timing budget and can be used only in short distance mode.
- 33 ms is the minimum timing budget which can work for all distance modes.
- 140 ms is the timing budget which allows the maximum distance of 4 m (in the dark on a white chart) to be reached with long distance mode
- */
- tof_distance_sensor.setMeasurementTimingBudget(tof_distance_sensor_timing_budget_ms * 1000);
- tof_distance_sensor.setTimeout(2); // timeout ms for synchronous measurements
- tof_distance_sensor.startContinuous(tof_distance_sensor_timing_budget_ms); // start continuous measurements, false means async
+ //tof_distance_sensor.readSingle(false); // read single measurement, false means async
 
 
 
@@ -981,22 +1062,46 @@ void loop() {
   }
 
   // tof distance - you need to wait 3ms longer than the 
-  if (every_n_ms(last_loop_time_ms, loop_time_ms, tof_distance_sensor_timing_budget_ms + 10)) {
-    Serial.print(".");
-    {
-      BlockTimer bt(tof_distance_stats);
-      tof_distance_sensor.read(true); // read pending measurement
+  if (every_n_ms(last_loop_time_ms, loop_time_ms, 2 * tof_distance_sensor_timing_budget_ms + 10)) {
+    for (auto tof : tof_sensors) {
+      // extra block to limit scope of BlockTimer
+      {
+        if(!tof->running) {
+          // wait one second to turn back on
+          if (millis() - tof->turn_off_ms > 1000) {
+            start_tof_distance_sensor(*tof);
+          }
+          continue;
+        }
+        auto sensor = tof->sensor;
+        BlockTimer bt(tof_distance_stats);
+
+        auto start = millis();
+        if (sensor->dataReady()) {
+          sensor->read(false); // read pending measurement
+          auto elapsed_ms = millis() - start;
+          if (false && elapsed_ms > 60) {
+            logf("tof read took %d ms, resetting sensor", elapsed_ms);
+            turn_off_tof_distance_sensor(*tof);
+          }
+          if (sensor->ranging_data.range_status == VL53L1X::RangeValid) {
+            tof->distance = sensor->ranging_data.range_mm / 1000.0;
+  
+          } else {
+            tof->distance = std::numeric_limits<float>::quiet_NaN();
+          }
+
+          struct timespec ts;
+          clock_gettime(CLOCK_REALTIME, &ts);
+          tof_distance_msg.header.stamp.sec = ts.tv_sec;
+          tof_distance_msg.header.stamp.nanosec =ts.tv_nsec;
       
-
-      if (tof_distance_sensor.ranging_data.range_status == VL53L1X::RangeValid) {
-        tof_distance = tof_distance_sensor.ranging_data.range_mm / 1000.0;
-
-      } else {
-        tof_distance = std::numeric_limits<float>::quiet_NaN();
+          tof_distance_msg.range = tof->distance;    
+          RCSOFTCHECK(rcl_publish(&(tof->publisher), &tof_distance_msg, NULL));
+      
+        }        
       }
     }
-      // tof_distance_sensor.readSingle(false); // start next measurement
-    logf("s: %5.2f tof distance m: %0.3f\n",loop_time_ms/1000., tof_distance);
   }
 
   if (every_10_ms) {
@@ -1007,15 +1112,15 @@ void loop() {
 
   if (every_1000_ms) {
     HangChecker hc("encoders");
-    logf("Encoders left: %fm (%d,%d) right: %fm (%d,%d) ms: %d, %d",
-        left_encoder.get_meters(),
-        left_encoder.odometer_a,
-        left_encoder.odometer_b,
-        right_encoder.get_meters(),
-        right_encoder.odometer_a,
-        right_encoder.odometer_b,
-        left_encoder.odometer_ab_us,
-        right_encoder.odometer_ab_us);
+    // logf("Encoders left: %fm (%d,%d) right: %fm (%d,%d) ms: %d, %d",
+    //     left_encoder.get_meters(),
+    //     left_encoder.odometer_a,
+    //     left_encoder.odometer_b,
+    //     right_encoder.get_meters(),
+    //     right_encoder.odometer_a,
+    //     right_encoder.odometer_b,
+    //     left_encoder.odometer_ab_us,
+    //     right_encoder.odometer_ab_us);
 
     // logf("Gps Checksums passed: %d failed: %d chars: %d sentences: %d",
     //       gps.passedChecksum(),
@@ -1028,7 +1133,11 @@ void loop() {
     //      left_encoder.odometer_a * meters_per_odometer_tick,
     //      right_encoder.odometer_a * meters_per_odometer_tick);
 
-    for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, process_crsf_byte_stats, tof_distance_stats}) {
+
+  }
+  
+  if (every_n_ms(last_loop_time_ms, loop_time_ms, 10000)) {
+    for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, crsf_parse_stats, tof_distance_stats}) {
       stats.to_log_msg(&log_msg);
       log(log_msg);
     }
@@ -1126,7 +1235,6 @@ void loop() {
     BlockTimer bt(compass_stats);
     HangChecker hc("compass");
     compass.read();
-    delay(2);
 
     // update magnetometer limits
     int x = compass.getX();
@@ -1199,4 +1307,5 @@ void loop() {
   }
 
   digitalWrite(pin_test, !digitalRead(pin_test));
+  delay(1);
 }

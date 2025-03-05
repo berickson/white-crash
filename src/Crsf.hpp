@@ -255,9 +255,9 @@ class Crsf {
       serial_read_stats.start();
       uint8_t c = crsf_serial.read();
       serial_read_stats.stop();
-      process_crsf_byte_stats.start();
+      crsf_parse_stats.start();
       process_crsf_byte(c);
-      process_crsf_byte_stats.stop();
+      crsf_parse_stats.stop();
       serial_read_stats.start();
       available = crsf_serial.available();
       serial_read_stats.stop();

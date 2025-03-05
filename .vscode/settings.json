@@ -53,6 +53,14 @@
         "chrono": "cpp",
         "forward_list": "cpp",
         "list": "cpp",
-        "regex": "cpp"
+        "regex": "cpp",
+        "bitset": "cpp",
+        "codecvt": "cpp",
+        "condition_variable": "cpp",
+        "set": "cpp",
+        "future": "cpp",
+        "iostream": "cpp",
+        "mutex": "cpp",
+        "thread": "cpp"
     }
 }
