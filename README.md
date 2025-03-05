@@ -29,3 +29,11 @@ View log messages (note qos-depth):
 ```bash
 ros2 topic echo /tank/log --qos-depth 50| grep -E --color=never -o "'.*\'"
 ```
+
+Run Foxglove Bridge
+
+```bash
+distrobox enter humble
+source /opt/ros/humble/setup.bash
+ros2 run foxglove_bridge foxglove_bridge
+```
