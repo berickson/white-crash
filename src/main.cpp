@@ -74,7 +74,8 @@ const int pin_left_rev = 4;
 const int pin_left_fwd = 5;
 
 const int pin_left_tof_power = 6;
-const int pin_right_tof_power = 7;
+const int pin_center_tof_power = 7;
+const int pin_right_tof_power = 13;
 
 const int pin_compass_sda = 18;
 const int pin_compass_scl = 21;
@@ -98,7 +99,8 @@ const int pin_crsf_tx = 40;
 //////////////////////////////////
 // i2c addresses
 const uint8_t left_tof_i2c_address = 0x14;
-const uint8_t right_tof_i2c_address = 0x15;
+const uint8_t center_tof_i2c_address = 0x15;
+const uint8_t right_tof_i2c_address = 0x16;
 
 //////////////////////////////////
 // Globals
@@ -114,6 +116,7 @@ Async_SparkFun_TMF882X  tof_sensor;
 tmf882x_msg_meas_results tof_sensor_results;
 #endif
 VL53L1X left_tof_distance_sensor_raw;
+VL53L1X center_tof_distance_sensor_raw;
 VL53L1X right_tof_distance_sensor_raw;
 
 struct TofSensor{
@@ -131,10 +134,12 @@ struct TofSensor{
 
 };
 TofSensor left_tof_sensor("left",&left_tof_distance_sensor_raw, pin_left_tof_power, left_tof_i2c_address);
+TofSensor center_tof_sensor = {"center",&center_tof_distance_sensor_raw, pin_center_tof_power, center_tof_i2c_address};
 TofSensor right_tof_sensor = {"right",&right_tof_distance_sensor_raw, pin_right_tof_power, right_tof_i2c_address};
 
 std::vector<TofSensor * > tof_sensors = {
   &left_tof_sensor,
+  &center_tof_sensor,
   &right_tof_sensor};
 
 
