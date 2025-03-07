@@ -129,18 +129,22 @@ struct TofSensor{
   uint32_t turn_off_ms = 0;
 
 };
-TofSensor left_tof_sensor("left",&left_tof_distance_sensor_raw, pin_left_tof_power, left_tof_i2c_address);
-TofSensor center_tof_sensor = {"center",&center_tof_distance_sensor_raw, pin_center_tof_power, center_tof_i2c_address};
-TofSensor right_tof_sensor = {"right",&right_tof_distance_sensor_raw, pin_right_tof_power, right_tof_i2c_address};
+TofSensor tof_left("left",&left_tof_distance_sensor_raw, pin_left_tof_power, left_tof_i2c_address);
+TofSensor tof_center = {"center",&center_tof_distance_sensor_raw, pin_center_tof_power, center_tof_i2c_address};
+TofSensor tof_right = {"right",&right_tof_distance_sensor_raw, pin_right_tof_power, right_tof_i2c_address};
 
 std::vector<TofSensor * > tof_sensors = {
-  &left_tof_sensor,
-  &center_tof_sensor,
-  &right_tof_sensor};
+  &tof_left,
+  &tof_center,
+  &tof_right};
 
 
-uint32_t tof_distance_sensor_timing_budget_ms = 20;
-float tof_distance = std::numeric_limits<float>::quiet_NaN();
+/*
+20 ms is the minimum timing budget and can be used only in short distance mode.
+33 ms is the minimum timing budget which can work for all distance modes.
+140 ms is the timing budget which allows the maximum distance of 4 m (in the dark on a white chart) to be reached with long distance mode
+*/
+uint32_t tof_timing_budget_ms = 33;
 
 QMC5883LCompass compass;
 QuadratureEncoder left_encoder(pin_left_encoder_a, pin_left_encoder_b, meters_per_odometer_tick);
@@ -688,14 +692,9 @@ void start_tof_distance_sensor(TofSensor & tof) {
   */
   tof.sensor->setDistanceMode(VL53L1X::Short);
 
-  /*
-  20 ms is the minimum timing budget and can be used only in short distance mode.
-  33 ms is the minimum timing budget which can work for all distance modes.
-  140 ms is the timing budget which allows the maximum distance of 4 m (in the dark on a white chart) to be reached with long distance mode
-  */
-  tof.sensor->setMeasurementTimingBudget(tof_distance_sensor_timing_budget_ms * 1000);
+  tof.sensor->setMeasurementTimingBudget(tof_timing_budget_ms * 1000);
   tof.sensor->setTimeout(2);  // timeout ms for synchronous measurements
-  tof.sensor->startContinuous(tof_distance_sensor_timing_budget_ms);
+  tof.sensor->startContinuous(tof_timing_budget_ms);
   tof.running = true;
 }
 
@@ -748,7 +747,7 @@ void setup() {
   gps_serial.setRxBufferSize(4096);
   gps_serial.begin(115200, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
 
-  gnss.enableDebugging(Serial, true);
+  
   for(int i = 0; i < 2; ++i) {
     if (gnss.begin(gps_serial)) {
       Serial.printf("GPS started\n");
@@ -757,7 +756,10 @@ void setup() {
     Serial.printf("GPS failed to start, retrying\n");
     delay(1000);
   } 
-
+  // gnss.setNMEAOutputPort(Serial);
+  gnss.setMeasurementRate(100);
+  gnss.setNavigationFrequency(10);
+  
   compass.init();
   if (!load_compass_calibration_from_spiffs()) {
     compass.setCalibration(-950, 675, -1510, 47, 0, 850);
@@ -765,9 +767,9 @@ void setup() {
   // see https://www.magnetic-declination.com/
   compass.setMagneticDeclination(11, 24);
 
-  start_tof_distance_sensor(left_tof_sensor);
-  start_tof_distance_sensor(right_tof_sensor);
-  start_tof_distance_sensor(center_tof_sensor);
+  start_tof_distance_sensor(tof_left);
+  start_tof_distance_sensor(tof_right);
+  start_tof_distance_sensor(tof_center);
 
   // quadrature encoders
 
@@ -868,7 +870,7 @@ void loop() {
   }
 
   // tof distance
-  if (every_n_ms(last_loop_time_ms, loop_time_ms, tof_distance_sensor_timing_budget_ms)) {
+  if (every_n_ms(last_loop_time_ms, loop_time_ms, tof_timing_budget_ms)) {
     for (auto tof : tof_sensors) {
       // extra block to limit scope of BlockTimer
       {
@@ -927,8 +929,6 @@ void loop() {
     // logf("meters traveled: %0.4f, %0.4f",
     //      left_encoder.odometer_a * meters_per_odometer_tick,
     //      right_encoder.odometer_a * meters_per_odometer_tick);
-
-
   }
   
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 10000)) {
@@ -949,12 +949,8 @@ void loop() {
 
 
     // const float v_bat_scale = 0.003714; // white-crash s
-    const float v_bat_scale = 0.0077578; // white-crash m
-  
-
-    
+    const float v_bat_scale = 0.0077578; // white-crash m    
     v_bat = v_bat_scale * sum  / sample_count;
-
     battery_msg.data = v_bat;
   }
 
@@ -1030,15 +1026,6 @@ void loop() {
     BlockTimer bt(compass_stats);
     HangChecker hc("compass");
     compass.read();
-
-    // update magnetometer limits
-    int x = compass.getX();
-    int y = compass.getY();
-    int z = compass.getZ();
-
-    // Serial.printf("compass: %d [%d, %d, %d]\n",
-    //   compass.getAzimuth(),
-    //   compass.getX(), compass.getY(), compass.getZ()    );
   }
 
   // blink for a few ms every second to show signs of life
@@ -1048,15 +1035,12 @@ void loop() {
     digitalWrite(pin_built_in_led, LOW);
   }
 
-  // if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
-  //   Serial.printf("esc: %d str: %d left_odo: %d  right_odo: %d\n",rx_esc, rx_str, left_encoder.odometer_a, right_encoder.odometer_a);
-  // }
-  if (every_10_ms) {
+  if (every_1_ms) {
     BlockTimer bt(crsf_stats);
     HangChecker hc("crsf");
-    // HangChecker hc("crsf");
     crsf.update();  // update as fast as possible, will call callbacks when data is ready
   }
+
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 200)) {
     BlockTimer bt(telemetry_stats);
     HangChecker hc("telemetry");
@@ -1069,8 +1053,6 @@ void loop() {
     crsf.send_flight_mode(display_string);
     crsf.send_attitude(0, 0, compass.getAzimuth());
 
-    //0=no fix, 1=dead reckoning, 2=2D, 3=3D, 4=GNSS, 5=Time fix
-
     if (gnss.getGnssFixOk(0)) {
       crsf.send_gps(
           gnss.getLatitude(0),
@@ -1082,10 +1064,6 @@ void loop() {
     } else {
       crsf.send_gps(0, 0, 0, 0, 0, 0);
     }
-  }
-
-  if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
-    // Serial.printf("mode: %s str: %d esc: %d aux: %d\n", fsm.current_task->name, rx_str, rx_esc, rx_aux);
   }
 
   digitalWrite(pin_test, !digitalRead(pin_test));
