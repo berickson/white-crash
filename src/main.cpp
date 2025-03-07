@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <QMC5883LCompass.h>
 #include <VL53L1X.h>
-#include "async_SparkFun_TMF882X_Library.h"
 #include <SPIFFS.h>
 #include <Wire.h>
 
@@ -27,8 +26,6 @@
 #include "RunStatistics.h"
 #include "StuckChecker.h"
 #include "secrets/wifi_login.h"
-
-#define has_tof 0
 
 
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h> // https://github.com/sparkfun/SparkFun_Ublox_Arduino_Library
@@ -111,10 +108,6 @@ HardwareSerial crsf_serial(0);
 HardwareSerial gps_serial(1);
 TinyGPSPlus gps;  // currently only used for distanceBetween and courseTo
 SFE_UBLOX_GNSS gnss;
-#if has_tof
-Async_SparkFun_TMF882X  tof_sensor;
-tmf882x_msg_meas_results tof_sensor_results;
-#endif
 VL53L1X left_tof_distance_sensor_raw;
 VL53L1X center_tof_distance_sensor_raw;
 VL53L1X right_tof_distance_sensor_raw;
@@ -174,32 +167,7 @@ RunStatistics tof_distance_stats("tof_distance");
 StuckChecker left_stuck_checker;
 StuckChecker right_stuck_checker;
 
-struct spad_mode_info {
-  uint8_t id;
-  uint8_t columns;
-  uint8_t rows;
-  uint8_t fov_degrees;
-  uint8_t y_fov_degrees;
-};
 
-// based on https://look.ams-osram.com/m/52236c476132a095/original/TMF8820-21-28-Multizone-Time-of-Flight-Sensor.pdf
-const spad_mode_info spad_mode_1 = {1, 3, 3, 33, 32}; // id, rows, columns, x_fov_degrees, y_fov_degrees
-const spad_mode_info spad_mode_2 = {2, 3, 3, 33, 37};
-const spad_mode_info spad_mode_3 = {3, 3, 3, 33, 45};
-const spad_mode_info spad_mode_6 = {6, 3, 3, 41, 52};
-const spad_mode_info spad_mode_11 = {11, 3, 3, 33, 32};
-const spad_mode_info spad_mode_12 = {12, 3, 3, 33, 32};
-const spad_mode_info spad_mode_7 = {7, 4, 4, 41, 52};
-const spad_mode_info spad_mode_4 = {4, 4, 4, 33, 47};
-const spad_mode_info spad_mode_5 = {5, 4, 4, 33, 47};
-const spad_mode_info spad_mode_13 = {13, 4, 4, 33, 42};
-const spad_mode_info spad_mode_10 = {10, 3, 6, 33, 60};
-
-
-
-
-uint8_t tof_spad_rows;
-uint8_t tof_spad_columns;
 
 //////////////////////////////////
 // Micro Ros
@@ -696,94 +664,6 @@ bool load_compass_calibration_from_spiffs() {
   return true;
 }
 
-void print_tof_results(struct tmf882x_msg_meas_results *myResults)
-{
-
-    // print out results
-    Serial.println("Measurement:");
-    Serial.print("Result Number: "); Serial.print(myResults->result_num);
-    Serial.print(" Number of Results: "); Serial.println(myResults->num_results);       
-
-    for(int i = 0; i < myResults->num_results; ++i) 
-    {
-      auto & result = myResults->results[i];
-
-        uint32_t pseudo_index = result.channel - 1 + 8 * (result.sub_capture);
-        Serial.print("pseudo_idx: "); Serial.print(pseudo_index);
-        Serial.print("    conf: "); Serial.print(result.confidence);
-        Serial.print(" distance mm: "); Serial.print(result.distance_mm);
-        Serial.print(" channel: "); Serial.print(result.channel);
-        Serial.print(" sub_capture: "); Serial.print(result.sub_capture);
-        Serial.print(" target_idx: "); Serial.print(result.ch_target_idx);
-
-        Serial.println();
-
-    }
-    Serial.print(" photon: "); Serial.print(myResults->photon_count);   
-    Serial.print(" ref photon: "); Serial.print(myResults->ref_photon_count);
-    Serial.print(" ALS: "); Serial.println(myResults->ambient_light); Serial.println();
-
-}
-
-void tof_measurement_callback(struct tmf882x_msg_meas_results *results) {
-  BlockTimer bt(tof_stats);
-
-  static uint32_t callback_count = 0;
-  callback_count++;
-
-  const int max_channel_count = 32;
-  uint32_t channels[max_channel_count]; // note, they send 1 based channels, so element 0 is unused
-  uint32_t confidences[max_channel_count];
-  memset(channels, 0, sizeof(channels));
-  memset(confidences, 0, sizeof(confidences));
-  uint32_t channel_min = std::numeric_limits<uint32_t>::max();
-  uint32_t channel_max = std::numeric_limits<uint32_t>::min();
-
-  uint32_t num_spads = tof_spad_rows * tof_spad_columns;
-
-  for(uint32_t i = 0; i < results->num_results; ++i) {
-    auto & result = results->results[i];
-    channel_max = std::max(channel_max, result.channel);
-    channel_min = std::min(channel_min, result.channel);
-    uint32_t idx = result.channel - 1 + 8 * result.sub_capture;
-    if(result.ch_target_idx == 0) {
-      channels[idx] = result.distance_mm;
-      confidences[idx] = result.confidence;
-    }
-  }
-
-  Serial.printf("callback_count: %d max confidence: %d\n", callback_count, *std::max_element(confidences, confidences + max_channel_count));
-
-  for(uint32_t i = 0; i < num_spads; ++i) {
-    // Serial.printf("%4d ",channels[i]);
-    auto d = channels[i];
-    auto c = " ";
-    if (d > 0 && confidences[i] >= 255) {
-      if (d < 100) {
-        c = "*";
-      } else if (d < 300) {
-        c = "o";
-      } else if (d < 1000) {
-        c = ".";
-      } else {
-        c = " ";
-      }
-    }
-    Serial.print(c);
-
-
-
-    // Serial.printf("%d: %d: %s: conf:%d",i,d, c, confidences[i]);
-    if (i % tof_spad_columns == tof_spad_columns - 1) {
-      Serial.println();
-    }
-  }
-
-  // print all fields of the results
-  // print_tof_results(results);
-//  Serial.println();
-}
-
 void start_tof_distance_sensor(TofSensor & tof) {
   pinMode(tof.power_pin, OUTPUT);
   digitalWrite(tof.power_pin, HIGH);
@@ -857,10 +737,6 @@ void setup() {
   left_speedometer.meters_per_tick = meters_per_odometer_tick;
   right_speedometer.meters_per_tick = meters_per_odometer_tick;
 
-
-
-
-
   fsm.begin();
 
   Serial.write("tank-train\n");
@@ -869,12 +745,8 @@ void setup() {
   gps_serial.setRxBufferSize(4096);
   gps_serial.begin(115200, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
 
-  //delay(10000); /// just wait for serial monitor to open
-
   gnss.enableDebugging(Serial, true);
   for(int i = 0; i < 2; ++i) {
-    //gnss.factoryReset();
-    delay(1000);
     if (gnss.begin(gps_serial)) {
       Serial.printf("GPS started\n");
       break;
@@ -882,7 +754,6 @@ void setup() {
     Serial.printf("GPS failed to start, retrying\n");
     delay(1000);
   } 
-
 
   compass.init();
   if (!load_compass_calibration_from_spiffs()) {
@@ -893,49 +764,6 @@ void setup() {
 
   start_tof_distance_sensor(left_tof_sensor);
   start_tof_distance_sensor(right_tof_sensor);
-
-
-
- //tof_distance_sensor.readSingle(false); // read single measurement, false means async
-
-
-
-  #if has_tof
-  tof_sensor.setSampleDelay(1);
-  if(!tof_sensor.begin(Wire1))
-  {
-    while(1) {
-      Serial.println("Error - The TMF882X failed to initialize - is the board connected?");
-      delay(1000);
-    }
-  } else {
-      Serial.println("TMF882X started.");
-  }
-  #endif
-
-  // see https://look.ams-osram.com/m/52236c476132a095/original/TMF8820-21-28-Multizone-Time-of-Flight-Sensor.pdf
-  // page 23
-  // and https://github.com/sparkfun/SparkFun_Qwiic_TMF882X_Arduino_Library/blob/main/docs/api_setup.md
-  // tmf882x_mode_app_config tofConfig;
-  // tof_sensor.getTMF882XConfig(tofConfig);
-  // tofConfig.spad_map_id = 6;
-  // if (!tof_sensor.setTMF882XConfig(tofConfig)){
-  //   while(true) {
-  //     Serial.println("Error - The TMF882X failed to set config");
-  //     delay(1000);
-  //   }
-  // }
-  #if 0
-  const spad_mode_info &spad_mode = spad_mode_6;
-  while (!tof_sensor.setCurrentSPADMap(spad_mode.id)) {
-    Serial.println("Error - The TMF882X failed to set SPAD map");
-    delay(1000);
-  }
-  tof_spad_rows = spad_mode.rows;
-  tof_spad_columns = spad_mode.columns;
-
-  tof_sensor.setMeasurementHandler(tof_measurement_callback);
-  #endif
 
   // quadrature encoders
 
@@ -977,10 +805,7 @@ void setup() {
     gps_serial.read();
   }
     */
-  #if has_tof
-  tof_sensor.async_startMeasuring();
-  logf("%s", "*********************** setup complete ***********************");
-  #endif
+
   digitalWrite(pin_built_in_led, 0);
 }
 
@@ -1046,13 +871,6 @@ void loop() {
   bool every_100_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 100);
   bool every_200_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 200);
   bool every_1000_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 1000);
-
-  #if has_tof
-  if(every_100_ms) {
-    BlockTimer bt(tof_stats);
-    tof_sensor.async_updateMeasuring();
-  }
-  #endif
 
   if (every_10_ms) {
     left_speedometer.update_from_sensor(micros(), left_encoder.odometer_a, left_encoder.last_odometer_a_us, left_encoder.odometer_b, left_encoder.last_odometer_b_us);
