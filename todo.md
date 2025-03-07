@@ -1,13 +1,14 @@
-
+set waypoints from radio control
+test with remote network and laptop (no home network)
 
 Auto add intermediate waypoints if they are spaced too far apart
-ROS on own thread, doesn't block main thread
 Estimate current by voltage and RPM, use this fur current limiting - see https://electronics.stackexchange.com/a/347027
 
 Mechanical
 - Battery Compartment:  You shouldn't have to remove the body to change the battery
 - Battery mounts for LiPo and/or hold in the LiIon better so they don't fall out when you go upside down
 - Power switch on Chassis instead of lid
+- add a camera
 
 enable running off-line, currently set_microros_wifi_transports blocks until connected
 
@@ -44,3 +45,5 @@ White-Crash M 3d model
 - ESP Mount tabs in wrong place
 - Wheel holes not printing properly
 3d add a body
+ROS on own thread, doesn't block main thread
+"dead man switch" - moving range of throttle or steering stops auto

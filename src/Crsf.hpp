@@ -29,6 +29,25 @@ float crsf_rc_channel_to_bool(uint16_t value) {
   return value > crsf_rc_channel_center;
 }
 
+enum InputPosition : uint8_t {
+  INPUT_FAILSAFE = 0,  // No signal/failsafe condition
+  INPUT_LOW = 1,       // Stick down / Switch low position
+  INPUT_CENTER = 2,    // Stick centered / Switch middle position
+  INPUT_HIGH = 3,      // Stick up / Switch high position
+};
+
+InputPosition get_input_position(uint16_t value) {
+  if (value == 0) {
+    return INPUT_FAILSAFE;
+  } else if (value < crsf_ns::crsf_rc_channel_center - 100) {
+    return INPUT_LOW;
+  } else if (value > crsf_ns::crsf_rc_channel_center + 100) {
+    return INPUT_HIGH;
+  } else {
+    return INPUT_CENTER;
+  }
+}
+
 }  // namespace crsf_ns
 
 namespace internal_to_crsf {

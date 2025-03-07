@@ -221,6 +221,10 @@ void logf(const char *format, ...) {
 }
 
 void error_loop() {
+  while (true) {
+    Serial.printf("error in micro_ros, error_loop() entered\n");
+    delay(1000);
+  }
 }
 
 void setup_micro_ros() {
@@ -618,6 +622,7 @@ std::vector<Fsm::Edge> edges = {
     Fsm::Edge("*", "auto", "auto"),
     Fsm::Edge("*", "failsafe", "failsafe"),
     Fsm::Edge("auto", "hand", "hand"),
+    Fsm::Edge("auto", "rc-moved", "hand"),
     Fsm::Edge("off", "hand", "hand"),
     Fsm::Edge("*", "off", "off"),
 };
@@ -625,6 +630,10 @@ std::vector<Fsm::Edge> edges = {
 Fsm fsm(tasks, edges);
 
 void ros_thread(void *arg) {
+  // setup_micro_ros will hang if it can't connect to the agent or wifi
+  // calling in a separate thread allows the rest of the system to continue
+  setup_micro_ros(); 
+
   while (true) {
     RCSOFTCHECK(rcl_publish(&battery_publisher, &battery_msg, NULL));
     delay(1000);
@@ -718,7 +727,6 @@ void setup() {
   log_msg.data.data = (char *)malloc(200);
   log_msg.data.capacity = 200;
   log_msg.data.size = 0;
-  setup_micro_ros();
 
   tof_distance_msg.header.frame_id.data = const_cast<char *>("tof");
   tof_distance_msg.header.frame_id.size = 3;
@@ -983,6 +991,8 @@ void loop() {
     HangChecker hc("mode event");
     static aux_mode_t last_aux_mode = aux_mode_failsafe;
     static bool last_button_sc_pressed = false;
+    static int last_rx_str = 0;
+    static int last_rx_esc = 0;
 
     aux_mode_t aux_mode;
     if (rx_aux == 0) {
@@ -1018,8 +1028,19 @@ void loop() {
       fsm.set_event("sc-click");
       logf("sc-click");
     }
+
+    // rc moved event
+    {
+      using namespace crsf_ns;
+      if (get_input_position(last_rx_str) != get_input_position(rx_str) || get_input_position(last_rx_esc) != get_input_position(rx_esc)) {
+        fsm.set_event("rc-moved");
+      }
+    }
+
     last_aux_mode = aux_mode;
     last_button_sc_pressed = button_sc_pressed;
+    last_rx_str = rx_str;
+    last_rx_esc = rx_esc;
   }
 
   if (every_100_ms) {
