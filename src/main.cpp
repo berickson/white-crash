@@ -13,6 +13,9 @@
 #include "quadrature_encoder.h"
 #include "speedometer.h"
 
+// esp32
+#include "driver/uart.h"
+
 // micro ros
 #include <micro_ros_platformio.h>
 #include <rcl/rcl.h>
@@ -136,7 +139,7 @@ std::vector<TofSensor * > tof_sensors = {
   &right_tof_sensor};
 
 
-uint32_t tof_distance_sensor_timing_budget_ms = 50;
+uint32_t tof_distance_sensor_timing_budget_ms = 20;
 float tof_distance = std::numeric_limits<float>::quiet_NaN();
 
 QMC5883LCompass compass;
@@ -692,7 +695,7 @@ void start_tof_distance_sensor(TofSensor & tof) {
   */
   tof.sensor->setMeasurementTimingBudget(tof_distance_sensor_timing_budget_ms * 1000);
   tof.sensor->setTimeout(2);  // timeout ms for synchronous measurements
-  tof.sensor->startContinuous(2 * tof_distance_sensor_timing_budget_ms);
+  tof.sensor->startContinuous(tof_distance_sensor_timing_budget_ms);
   tof.running = true;
 }
 
@@ -764,6 +767,7 @@ void setup() {
 
   start_tof_distance_sensor(left_tof_sensor);
   start_tof_distance_sensor(right_tof_sensor);
+  start_tof_distance_sensor(center_tof_sensor);
 
   // quadrature encoders
 
@@ -795,16 +799,9 @@ void setup() {
       1);
 
   // reset all serial data
-  crsf_serial.flush();
-  gps_serial.flush();
-  /*
-  while(crsf_serial.available()) {
-    crsf_serial.read();
-  }
-  while(gps_serial.available()) {
-    gps_serial.read();
-  }
-    */
+  uart_flush_input(0);
+  uart_flush_input(1);
+
 
   digitalWrite(pin_built_in_led, 0);
 }
@@ -826,14 +823,6 @@ class HangChecker {
     int elapsed = now - start_ms;
     if (elapsed > timeout_ms) {
       logf("HANG: %s", name);
-      // left_motor.go(0);
-      // right_motor.go(0);
-      // digitalWrite(pin_built_in_led, HIGH);
-      // while (true) {
-      //   Serial.printf("%s hanged for %d ms\n", name, elapsed);
-
-      //   delay(1000);
-      // }
     }
   }
 };
@@ -862,6 +851,7 @@ uint8_t estimate_lipo_battery_percent_from_voltage(float v) {
 }
 
 void loop() {
+  delay(1); // give the system a little time to breathe
   BlockTimer bt(loop_stats);
   last_loop_time_ms = loop_time_ms;
   loop_time_ms = millis();
@@ -875,45 +865,28 @@ void loop() {
   if (every_10_ms) {
     left_speedometer.update_from_sensor(micros(), left_encoder.odometer_a, left_encoder.last_odometer_a_us, left_encoder.odometer_b, left_encoder.last_odometer_b_us);
     right_speedometer.update_from_sensor(micros(), right_encoder.odometer_a, right_encoder.last_odometer_a_us, right_encoder.odometer_b, right_encoder.last_odometer_b_us);
-    // logf("v_bat: %3.2f (%%,v): left (%0.2f, %0.2f) right (%0.2f, %0.2f)", 
-    //   v_bat,
-    //   left_motor.get_setpoint(),
-    //   left_speedometer.get_velocity(),
-    //   right_motor.get_setpoint(), 
-    //   right_speedometer.get_velocity()
-    // );
   }
 
-  // tof distance - you need to wait 3ms longer than the 
-  if (every_n_ms(last_loop_time_ms, loop_time_ms, 2 * tof_distance_sensor_timing_budget_ms + 10)) {
+  // tof distance
+  if (every_n_ms(last_loop_time_ms, loop_time_ms, tof_distance_sensor_timing_budget_ms)) {
     for (auto tof : tof_sensors) {
       // extra block to limit scope of BlockTimer
       {
-        if(!tof->running) {
-          // wait one second to turn back on
-          if (millis() - tof->turn_off_ms > 1000) {
-            start_tof_distance_sensor(*tof);
+        {
+          auto sensor = tof->sensor;
+          BlockTimer bt(tof_distance_stats);
+
+          auto start = millis();
+          if (sensor->read(false)) {
+            if (sensor->ranging_data.range_status == VL53L1X::RangeValid) {
+              tof->distance = sensor->ranging_data.range_mm / 1000.0;
+    
+            } else {
+              tof->distance = std::numeric_limits<float>::quiet_NaN();
+            }      
           }
-          continue;
         }
-        auto sensor = tof->sensor;
-        BlockTimer bt(tof_distance_stats);
-
-        auto start = millis();
-        if (sensor->dataReady()) {
-          sensor->read(false); // read pending measurement
-          auto elapsed_ms = millis() - start;
-          if (false && elapsed_ms > 60) {
-            logf("tof read took %d ms, resetting sensor", elapsed_ms);
-            turn_off_tof_distance_sensor(*tof);
-          }
-          if (sensor->ranging_data.range_status == VL53L1X::RangeValid) {
-            tof->distance = sensor->ranging_data.range_mm / 1000.0;
-  
-          } else {
-            tof->distance = std::numeric_limits<float>::quiet_NaN();
-          }
-
+        {  
           struct timespec ts;
           clock_gettime(CLOCK_REALTIME, &ts);
           tof_distance_msg.header.stamp.sec = ts.tv_sec;
@@ -921,8 +894,7 @@ void loop() {
       
           tof_distance_msg.range = tof->distance;    
           RCSOFTCHECK(rcl_publish(&(tof->publisher), &tof_distance_msg, NULL));
-      
-        }        
+        }    
       }
     }
   }
@@ -1110,19 +1082,6 @@ void loop() {
     } else {
       crsf.send_gps(0, 0, 0, 0, 0, 0);
     }
-
-
-    // if (gps.location.isValid()) {
-    //   crsf.send_gps(
-    //       gps.location.lat(),
-    //       gps.location.lng(),
-    //       gps.altitude.meters(),
-    //       gps.speed.kmph(),
-    //       gps.course.deg(),
-    //       gps.satellites.value());
-    // } else {
-    //   crsf.send_gps(0, 0, 0, 0, 0, 0);
-    // }
   }
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
@@ -1130,5 +1089,4 @@ void loop() {
   }
 
   digitalWrite(pin_test, !digitalRead(pin_test));
-  delay(1);
 }
