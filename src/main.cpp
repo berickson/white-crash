@@ -34,6 +34,7 @@
 
 // Feature enable/disable
 const bool use_gnss = false;
+const bool enable_stats_logging = false;
 
 
 // calibration constants
@@ -162,6 +163,8 @@ int rx_aux = 0;
 bool button_sc_pressed = false;
 double v_bat = NAN;
 
+bool ros_ready = false;
+
 
 RunStatistics gps_stats("gps");
 RunStatistics log_stats("logf");
@@ -209,7 +212,9 @@ rcl_node_t node;
 // logs to ros and serial
 void log(std_msgs__msg__String &msg) {
   BlockTimer bt(log_stats);
-  RCSOFTCHECK(rcl_publish(&log_publisher, &msg, NULL));
+  if (ros_ready) {
+    RCSOFTCHECK(rcl_publish(&log_publisher, &msg, NULL));
+  }
   Serial.write(msg.data.data, msg.data.size);
   Serial.write("\n");
 }
@@ -230,31 +235,11 @@ void error_loop() {
   }
 }
 
-void setup_micro_ros() {
-  Serial.printf("setting up micro ros\n");
-  IPAddress agent_ip(192, 168, 86, 66);
-  size_t agent_port = 8888;
-
-  char *ssid = const_cast<char *>(wifi_ssid);
-  char *psk = const_cast<char *>(wifi_password);
-
-  
-  set_microros_wifi_transports(ssid, psk, agent_ip, agent_port);
-  // checkto see if we can connect to the agent
-
-
-  // delay(2000);
-  // uint32_t timeout_ms = 1000;
-  // rmw_uros_sync_session(timeout_ms);
-
-  allocator = rcl_get_default_allocator();
-  configTime(0, 0, "pool.ntp.org");
-
-  // create init_options
-  RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
-
+void create_ros_node_and_publishers() { 
   // create node
-  RCCHECK(rclc_node_init_default(&node, "micro_ros_arduino_wifi_node", "", &support));
+  const char *node_name = "white_crash";
+  RCCHECK(rclc_node_init_default(&node, node_name, "", &support));
+  Serial.printf("Created ROS node %s\n", node_name);
 
   // create publishers
 
@@ -279,8 +264,51 @@ void setup_micro_ros() {
         ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
         topic));
   }
+}
+
+
+void destroy_ros_node_and_publishers() { 
+  rcl_publisher_fini(&log_publisher, &node);
+  rcl_publisher_fini(&battery_publisher, &node);
+  for (auto tof : tof_sensors) {
+    rcl_publisher_fini(&tof->publisher, &node);
+  }
+
+  rcl_node_fini(&node);
+}
+
+
+
+void setup_micro_ros() {
+  Serial.printf("setting up micro ros\n");
+  IPAddress agent_ip(192, 168, 86, 66);
+  size_t agent_port = 8888;
+
+  char *ssid = const_cast<char *>(wifi_ssid);
+  char *psk = const_cast<char *>(wifi_password);
+
+  
+  set_microros_wifi_transports(ssid, psk, agent_ip, agent_port);
+
+
+  // delay(2000);
+  // uint32_t timeout_ms = 1000;
+  // rmw_uros_sync_session(timeout_ms);
+
+  allocator = rcl_get_default_allocator();
+  configTime(0, 0, "pool.ntp.org");
+
+  // connect to micro-ros agent
+  while (rclc_support_init(&support, 0, NULL, &allocator) != RCL_RET_OK) {
+    Serial.printf("failed to init support, verify that micro-ros-agent is running at %s:%d \n", agent_ip.toString().c_str(), agent_port);
+    delay(1000);
+  }
+
+  create_ros_node_and_publishers();
+
 
   Serial.printf("micro ros initialized\n");
+  ros_ready = true;
 }
 
 //////////////////////////////////
@@ -633,9 +661,35 @@ std::vector<Fsm::Edge> edges = {
 Fsm fsm(tasks, edges);
 
 void ros_thread(void *arg) {
+  delay(5000); // sleep to allow for serial monitor to connect
   // setup_micro_ros will hang if it can't connect to the agent or wifi
   // calling in a separate thread allows the rest of the system to continue
-  setup_micro_ros(); 
+  setup_micro_ros();
+
+  while (true) {
+    while (ros_ready == false) {
+      Serial.printf("Attempting to reconnect to micro-ROS agent\n");
+      if (rclc_support_init(&support, 0, NULL, &allocator) == RCL_RET_OK) {
+        create_ros_node_and_publishers();    
+        ros_ready = true;
+        logf("Reconnected to micro-ROS agent");
+      } else {
+        delay(1000);
+      }
+    }
+    // make sure ros is still connected
+    const int timout_ms = 100;
+    if (rmw_uros_ping_agent(timout_ms, 2) != RMW_RET_OK) {
+      ros_ready = false;
+      Serial.printf("Lost connection to ROS agent\n");
+      Serial.printf("Shutting down rclc_support\n");
+      destroy_ros_node_and_publishers();
+      rclc_support_fini(&support);
+      Serial.printf("rclc_support shut down\n");
+    }
+
+    delay(100); // sleep to allow other tasks to run
+  }
 
   while (true) {
     RCSOFTCHECK(rcl_publish(&battery_publisher, &battery_msg, NULL));
@@ -898,15 +952,17 @@ void loop() {
           BlockTimer bt(tof_distance_stats);
 
           auto start = millis();
-          if (sensor->read(false)) {
+          if (sensor->read(true)) {
             if (sensor->ranging_data.range_status == VL53L1X::RangeValid) {
               tof->distance = sensor->ranging_data.range_mm / 1000.0;
     
             } else {
+              printf("VL53L1X %s distance status: %d\n", tof->name, sensor->ranging_data.range_status);
               tof->distance = std::numeric_limits<float>::quiet_NaN();
             }      
           }
         }
+        if (ros_ready)
         {  
           struct timespec ts;
           clock_gettime(CLOCK_REALTIME, &ts);
@@ -956,7 +1012,7 @@ void loop() {
     //      right_encoder.odometer_a * meters_per_odometer_tick);
   }
   
-  if (every_n_ms(last_loop_time_ms, loop_time_ms, 10000)) {
+  if (enable_stats_logging && every_n_ms(last_loop_time_ms, loop_time_ms, 10000)) {
     for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, crsf_parse_stats, tof_distance_stats}) {
       stats.to_log_msg(&log_msg);
       log(log_msg);
