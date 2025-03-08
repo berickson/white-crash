@@ -196,7 +196,7 @@ rcl_node_t node;
   {                                \
     rcl_ret_t temp_rc = fn;        \
     if ((temp_rc != RCL_RET_OK)) { \
-      error_loop();                \
+      Serial.printf("ROS Function Call Failed %s\n", #fn);                \
     }                              \
   }
 #define RCSOFTCHECK(fn)            \
