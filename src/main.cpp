@@ -13,8 +13,7 @@
 #include "quadrature_encoder.h"
 #include "speedometer.h"
 
-// esp32
-#include "driver/uart.h"
+#include "driver/uart.h" // to clear the serial buffer
 
 // micro ros
 #include <micro_ros_platformio.h>
@@ -32,6 +31,10 @@
 
 
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h> // https://github.com/sparkfun/SparkFun_Ublox_Arduino_Library
+
+// Feature enable/disable
+const bool use_gnss = false;
+
 
 // calibration constants
 //float meters_per_odometer_tick = 0.00008204; // S
@@ -91,8 +94,8 @@ const int pin_right_encoder_a = 33;
 const int pin_right_encoder_b = 34;
 const int pin_left_encoder_b = 35;
 const int pin_left_encoder_a = 36;
-const int pin_gps_rx = 37;
-const int pin_gps_tx = 38;
+const int pin_gps_rx = 38;
+const int pin_gps_tx = 37;
 const int pin_crsf_rx = 39;
 const int pin_crsf_tx = 40;
 
@@ -106,9 +109,9 @@ const uint8_t right_tof_i2c_address = 0x16;
 // Globals
 
 DRV8833 left_motor;
-DRV8833 right_motor;
+DRV8833 right_motor; 
 HardwareSerial crsf_serial(0);
-HardwareSerial gps_serial(1);
+HardwareSerial gnss_serial(1);
 TinyGPSPlus gps;  // currently only used for distanceBetween and courseTo
 SFE_UBLOX_GNSS gnss;
 VL53L1X left_tof_distance_sensor_raw;
@@ -752,21 +755,23 @@ void setup() {
   Serial.write("tank-train\n");
   crsf_serial.setRxBufferSize(4096);
   crsf_serial.begin(420000, SERIAL_8N1, pin_crsf_rx, pin_crsf_tx);
-  gps_serial.setRxBufferSize(4096);
-  gps_serial.begin(115200, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
+  gnss_serial.setRxBufferSize(4096);
+  gnss_serial.begin(115200, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
 
-  
-  for(int i = 0; i < 2; ++i) {
-    if (gnss.begin(gps_serial)) {
-      Serial.printf("GPS started\n");
-      break;
-    }
-    Serial.printf("GPS failed to start, retrying\n");
-    delay(1000);
-  } 
-  // gnss.setNMEAOutputPort(Serial);
-  gnss.setMeasurementRate(100);
-  gnss.setNavigationFrequency(10);
+  if (use_gnss) {
+    for(int i = 0; i < 5; ++i) {
+      if (gnss.begin(gnss_serial)) {
+        Serial.printf("GPS started\n");
+        break;
+      }
+      Serial.printf("GPS failed to start, retrying\n");
+      delay(1000);
+    } 
+    gnss.setUART1Output(COM_TYPE_NMEA);
+    gnss.setNMEAOutputPort(Serial);
+    gnss.setMeasurementRate(100);
+    gnss.setNavigationFrequency(10);
+  }
   
   compass.init();
   if (!load_compass_calibration_from_spiffs()) {
@@ -877,6 +882,12 @@ void loop() {
     right_speedometer.update_from_sensor(micros(), right_encoder.odometer_a, right_encoder.last_odometer_a_us, right_encoder.odometer_b, right_encoder.last_odometer_b_us);
   }
 
+  if(use_gnss && every_100_ms) {
+    while(gnss_serial.available()) {
+      Serial.write(gnss_serial.read());
+    }
+  }
+
   // tof distance
   if (every_n_ms(last_loop_time_ms, loop_time_ms, tof_timing_budget_ms)) {
     for (auto tof : tof_sensors) {
@@ -909,11 +920,17 @@ void loop() {
     }
   }
 
-  if (every_10_ms) {
+  if (use_gnss && every_10_ms) {
     BlockTimer bt(gps_stats);
     HangChecker hc("gps");
     gnss.checkUblox();
   }
+
+  if (use_gnss && every_1000_ms) {
+    gnss.getFixType();
+    Serial.printf("gps fix type: %d\n", gnss.getFixType()); 
+  }
+
 
   if (every_1000_ms) {
     HangChecker hc("encoders");
@@ -1074,7 +1091,7 @@ void loop() {
     crsf.send_flight_mode(display_string);
     crsf.send_attitude(0, 0, compass.getAzimuth());
 
-    if (gnss.getGnssFixOk(0)) {
+    if (use_gnss && gnss.getGnssFixOk(0)) {
       crsf.send_gps(
           gnss.getLatitude(0),
           gnss.getLongitude(0),
