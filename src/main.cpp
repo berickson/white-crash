@@ -43,7 +43,8 @@ class Severity {
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h> // https://github.com/sparkfun/SparkFun_Ublox_Arduino_Library
 
 // Feature enable/disable
-const bool use_gnss = true;
+const bool use_gnss = true; // sparkfun ublox
+const bool use_gps = false;  // tinygps
 const bool enable_stats_logging = false;
 const bool avoid_collisions = true;
 
@@ -401,7 +402,7 @@ bool go_toward_lat_lon(lat_lon destination, float * meters_to_next_waypoint) {
   const float max_speed = 0.5;
 
 
-  if (gnss.getGnssFixOk() == 0) {
+  if (gnss.getGnssFixOk(0) == 0) {
     left_motor.go(0);
     right_motor.go(0);
     return false;
@@ -834,6 +835,8 @@ void setup() {
 
   SPIFFS.begin();
 
+  sleep(5); // wait for serial monitor to connect
+
   // preallocate log message for all logging
   log_msg.data.data = (char *)malloc(200);
   log_msg.data.capacity = 200;
@@ -888,21 +891,33 @@ void setup() {
   gnss_serial.setRxBufferSize(4096);
   gnss_serial.begin(115200, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
 
+  // In setup(), after gnss.begin():
   if (use_gnss) {
-    for(int i = 0; i < 5; ++i) {
-      if (gnss.begin(gnss_serial)) {
-        Serial.printf("GPS started\n");
-        break;
-      }
-      Serial.printf("GPS failed to start, retrying\n");
-      delay(1000);
-    } 
-    gnss.setUART1Output(COM_TYPE_NMEA);
-    // gnss.setNMEAOutputPort(Serial);
-    gnss.setMeasurementRate(100);
-    gnss.setNavigationFrequency(10);
+    if (gnss.begin(gnss_serial)) {
+      // Configure message output
+      gnss.setUART1Output(COM_TYPE_NMEA);
+      gnss.enableNMEAMessage(UBX_NMEA_RMC, COM_PORT_UART1);  // Time and date
+      gnss.enableNMEAMessage(UBX_NMEA_GGA, COM_PORT_UART1);  // Fix data
+      gnss.enableNMEAMessage(UBX_NMEA_ZDA, COM_PORT_UART1);  // Precise time/date
+
+      gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GPS);
+      gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GALILEO);  // Enable Galileo
+
+      // Configure time base and update rate
+      gnss.setMeasurementRate(100);     // Measurements every 100ms
+      gnss.setNavigationFrequency(10);  // Navigation rate 10Hz
+
+      // Enable time pulse (PPS)
+      gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GPS);
+
+      // Save configuration
+      bool success = gnss.saveConfiguration();
+      Serial.printf("GPS configuration %s\n", success ? "saved" : "failed to save");
+
+      Serial.println("GPS configured");
+    }
   }
-  
+
   compass.init();
   if (!load_compass_calibration_from_spiffs()) {
     compass.setCalibration(-950, 675, -1510, 47, 0, 850);
@@ -1048,7 +1063,51 @@ void loop() {
     BlockTimer bt(gps_stats);
     HangChecker hc("gps");
     gnss.checkUblox();
+    gnss.checkCallbacks();
   }
+
+  if (use_gps && every_10_ms) {
+    BlockTimer bt(gps_stats);
+    HangChecker hc("gps");
+    while (gnss_serial.available()) {
+      auto c = gnss_serial.read();
+      gps.encode(c);
+      Serial.write(c);
+    }
+  }
+
+  if (use_gps && every_1000_ms ) {
+    auto & location = gps.location;
+    // log all fields with logf
+
+    logf( "chars processed: %d checksum ok: %d checksum bad: %d valid: %d lat: %0.6f lon: %0.6f age: %d second: %d satellites: %d",
+      gps.charsProcessed(),
+      gps.passedChecksum(),
+      gps.failedChecksum(),
+      location.isValid(),
+      location.lat(),
+      location.lng(),
+      location.age(),
+      gps.time.second(),
+      gps.satellites.value()
+    );
+  }
+
+// In your logging code, add more debug info:
+if (use_gnss && every_1000_ms) {
+  logf("gps date: (%d) %d-%d-%d %02d:%02d:%02d fix: %d siv: %d",
+    gnss.getTimeValid(0),
+    gnss.getYear(0),
+    gnss.getMonth(0),
+    gnss.getDay(0),
+    gnss.getHour(0),
+    gnss.getMinute(0),
+    gnss.getSecond(0),
+    gnss.getFixType(),
+    gnss.getSIV(0)  // Satellites in view
+  );
+}
+
 
   if (use_gnss && every_1000_ms) {
     gnss.getFixType();
