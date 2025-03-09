@@ -33,9 +33,9 @@
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h> // https://github.com/sparkfun/SparkFun_Ublox_Arduino_Library
 
 // Feature enable/disable
-const bool use_gnss = false;
+const bool use_gnss = true;
 const bool enable_stats_logging = false;
-
+const bool avoid_collisions = true;
 
 // calibration constants
 //float meters_per_odometer_tick = 0.00008204; // S
@@ -447,6 +447,19 @@ void update_motor_speeds() {
   double speed = crsf_ns::crsf_rc_channel_to_float(rx_esc);
   double str_speed = crsf_ns::crsf_rc_channel_to_float(rx_str);
 
+  if (avoid_collisions) {
+    // if we are moving forward and the tof is less than 0.9 meters, limit speed to avoid collision
+    auto collision_distance = min(tof_left.distance, min(tof_center.distance, tof_right.distance));
+    if (speed > 0 && !isnan(tof_center.distance) && collision_distance < 0.9) {
+      auto max_speed = min(speed, collision_distance  - 0.1);
+      if (max_speed < 0) {
+        max_speed = 0;
+      }
+
+      speed = max_speed;
+    }
+  }
+
   // don't move if speed is too low
   if (abs(speed) < 0.05) {
     speed = 0.0;
@@ -822,7 +835,7 @@ void setup() {
       delay(1000);
     } 
     gnss.setUART1Output(COM_TYPE_NMEA);
-    gnss.setNMEAOutputPort(Serial);
+    // gnss.setNMEAOutputPort(Serial);
     gnss.setMeasurementRate(100);
     gnss.setNavigationFrequency(10);
   }
@@ -936,11 +949,6 @@ void loop() {
     right_speedometer.update_from_sensor(micros(), right_encoder.odometer_a, right_encoder.last_odometer_a_us, right_encoder.odometer_b, right_encoder.last_odometer_b_us);
   }
 
-  if(use_gnss && every_100_ms) {
-    while(gnss_serial.available()) {
-      Serial.write(gnss_serial.read());
-    }
-  }
 
   // tof distance
   if (every_n_ms(last_loop_time_ms, loop_time_ms, tof_timing_budget_ms)) {
