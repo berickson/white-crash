@@ -1,4 +1,5 @@
 Todo
+- micro-ros-agent errors, eprosima::fastcdr::exception::BadParamException, etc.
 - faster gps library
 - set waypoints from radio control
 - test with remote network and laptop (no home network)
