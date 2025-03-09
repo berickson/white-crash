@@ -20,6 +20,7 @@
 #include <rcl/rcl.h>
 #include <rclc/executor.h>
 #include <rclc/rclc.h>
+#include <rcl_interfaces/msg/log.h>
 #include <std_msgs/msg/float32.h>
 #include <std_msgs/msg/int32.h>
 #include <std_msgs/msg/string.h>
@@ -29,6 +30,15 @@
 #include "StuckChecker.h"
 #include "secrets/wifi_login.h"
 
+class Severity {
+  public: enum SeverityLevel {
+    DEBUG = 10,
+    INFO = 20,
+    WARN = 30,
+    ERROR = 40,
+    FATAL = 50
+  };
+};
 
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h> // https://github.com/sparkfun/SparkFun_Ublox_Arduino_Library
 
@@ -186,10 +196,12 @@ StuckChecker right_stuck_checker;
 // Micro Ros
 
 rcl_publisher_t log_publisher;
+rcl_publisher_t rosout_publisher;
 rcl_publisher_t battery_publisher;
 sensor_msgs__msg__Range tof_distance_msg;
 std_msgs__msg__String log_msg;
 std_msgs__msg__Float32 battery_msg;
+rcl_interfaces__msg__Log rosout_msg;
 
 rclc_support_t support;
 rcl_allocator_t allocator;
@@ -209,6 +221,14 @@ rcl_node_t node;
     }                              \
   }
 
+
+void set_stamp(builtin_interfaces__msg__Time & stamp) {
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  stamp.sec = ts.tv_sec;
+  stamp.nanosec = ts.tv_nsec;
+}
+  
 // logs to ros and serial
 void log(std_msgs__msg__String &msg) {
   BlockTimer bt(log_stats);
@@ -219,13 +239,41 @@ void log(std_msgs__msg__String &msg) {
   Serial.write("\n");
 }
 
+void log_rosout(rcl_interfaces__msg__Log &msg) {
+  BlockTimer bt(log_stats);
+  if (ros_ready) {
+    RCSOFTCHECK(rcl_publish(&rosout_publisher, &msg, NULL));
+  }
+}
+
+
+void logf(Severity::SeverityLevel severity, const char *format, ...) {
+  va_list args;
+  va_start(args, format);
+  log_msg.data.size = vsnprintf(log_msg.data.data, log_msg.data.capacity, format, args);
+  rosout_msg.msg.size = vsnprintf(rosout_msg.msg.data, rosout_msg.msg.capacity, format, args);
+  
+  va_end(args);
+
+  rosout_msg.level = severity;
+  log(log_msg);
+  log_rosout(rosout_msg);
+}
+
 void logf(const char *format, ...) {
   va_list args;
   va_start(args, format);
   log_msg.data.size = vsnprintf(log_msg.data.data, log_msg.data.capacity, format, args);
+  rosout_msg.msg.size = vsnprintf(rosout_msg.msg.data, rosout_msg.msg.capacity, format, args);
+
+  // set the timestamp
+  set_stamp(rosout_msg.stamp);
+
   va_end(args);
 
+  rosout_msg.level = Severity::INFO;
   log(log_msg);
+  log_rosout(rosout_msg);
 }
 
 void error_loop() {
@@ -247,17 +295,23 @@ void create_ros_node_and_publishers() {
       &log_publisher,
       &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
-      "/tank/log"));
+      "/white_crash/log"));
+  
+  RCCHECK(rclc_publisher_init_best_effort(
+      &rosout_publisher,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(rcl_interfaces, msg, Log),
+      "/rosout_best_effort"));
 
   RCCHECK(rclc_publisher_init_best_effort(
       &battery_publisher,
       &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-      "/tank/battery"));
+      "/white_crash/battery"));
   
   for (auto tof : tof_sensors) {
     char topic[30];
-    snprintf(topic, sizeof(topic), "/tank/%s_distance", tof->name);
+    snprintf(topic, sizeof(topic), "/white_crash/%s_distance", tof->name);
     RCCHECK(rclc_publisher_init_best_effort(
         &tof->publisher,
         &node,
@@ -268,13 +322,13 @@ void create_ros_node_and_publishers() {
 
 
 void destroy_ros_node_and_publishers() { 
-  rcl_publisher_fini(&log_publisher, &node);
-  rcl_publisher_fini(&battery_publisher, &node);
+  RCCHECK(rcl_publisher_fini(&log_publisher, &node));
+  RCCHECK(rcl_publisher_fini(&battery_publisher, &node));
   for (auto tof : tof_sensors) {
-    rcl_publisher_fini(&tof->publisher, &node);
+    RCCHECK(rcl_publisher_fini(&tof->publisher, &node));
   }
 
-  rcl_node_fini(&node);
+  RCCHECK(rcl_node_fini(&node));
 }
 
 
@@ -405,7 +459,7 @@ bool go_toward_lat_lon(lat_lon destination, float * meters_to_next_waypoint) {
   right_motor.go(right_motor_speed);
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
-    logf("speed: %f, %f destination: %f %f direction: %s, distance_remaining: %0.4f, desired_bearing_degrees: %0.4f current_heading_degrees: %0.4f heading_error: %0.4f\n",
+    logf("speed: %f, %f destination: %f %f direction: %s, distance_remaining: %0.4f, desired_bearing_degrees: %0.4f current_heading_degrees: %0.4f heading_error: %0.4f",
          left_motor_speed,
          right_motor_speed, 
          destination.lat,
@@ -467,7 +521,7 @@ void update_motor_speeds() {
 void update_compass_calibration(int min_x, int max_x, int min_y, int max_y, int min_z, int max_z) {
 
   compass.setCalibration(min_x, max_x, min_y, max_y, min_z, max_z);
-  logf("updated compass calibration to %d %d %d %d %d %d\n", min_x, max_x, min_y, max_y, min_z, max_z);
+  logf("updated compass calibration to %d %d %d %d %d %d", min_x, max_x, min_y, max_y, min_z, max_z);
 }
 //////////////////////////////////
 // Finite state machine
@@ -475,6 +529,10 @@ class HandMode : public Task {
  public:
   HandMode() {
     name = "hand";
+  }
+
+  virtual void begin() override {
+    logf("hand mode begin");
   }
 
   // implement the execute method
@@ -493,7 +551,7 @@ class CalibrateCompassMode : public Task {
   }
 
   virtual void begin() override {
-    logf("calibrate compass mode\n");
+    logf("calibrate compass mode");
     compass.clearCalibration();
     compass.read(); // reading forces the calibration to apply
     min_x = min_y = min_z = std::numeric_limits<int>::max();
@@ -508,7 +566,7 @@ class CalibrateCompassMode : public Task {
     int y = compass.getY();
     int z = compass.getZ();
 
-    logf("compass_xyz: %d %d %d\n", x, y, z);
+    logf("compass_xyz: %d %d %d", x, y, z);
     if (x < min_x) min_x = x;
     if (x > max_x) max_x = x;
     if (y < min_y) min_y = y;
@@ -520,13 +578,13 @@ class CalibrateCompassMode : public Task {
   virtual void end() override {
     update_compass_calibration(min_x, max_x, min_y, max_y, min_z, max_z);
 
-    logf("calibrated compass: %d %d %d %d %d %d\n", min_x, max_x, min_y, max_y, min_z, max_z);
+    logf("calibrated compass: %d %d %d %d %d %d", min_x, max_x, min_y, max_y, min_z, max_z);
 
     // write to flash memory
     {
       File file = SPIFFS.open(compass_calibration_file_path, FILE_WRITE);
       if (!file) {
-        logf("failed to open file for writing\n");
+        logf("failed to open file for writing");
       } else {
         file.printf("%d,%d,%d,%d,%d,%d\n", min_x, max_x, min_y, max_y, min_z, max_z);
         file.close();
@@ -540,6 +598,11 @@ class OffMode : public Task {
  public:
   OffMode() {
     name = "off";
+  }
+
+  void begin() override {
+    done = false;
+    logf("off mode begin");
   }
 
   // implement the execute method
@@ -564,7 +627,7 @@ class AutoMode : public Task {
 
   void begin() override {
     done = false;
-    Serial.write("auto mode begin\n");
+    logf("auto mode begin");
     step = 0;
   }
 
@@ -578,10 +641,10 @@ class AutoMode : public Task {
       const float minimum_unstick_distance = 0.5;
       float left_unstick_distance = abs(left_encoder.get_meters() - unstick_left_start_meters);
       float right_unstick_distance = abs(right_encoder.get_meters() - unstick_right_start_meters);
-      logf("unsticking left: %0.4f right: %0.4f\n", left_unstick_distance, right_unstick_distance);
+      logf("unsticking left: %0.4f right: %0.4f", left_unstick_distance, right_unstick_distance);
       // considered unstuck when both motors have gone minimum_unstick_distance absolute
       if ((left_unstick_distance > minimum_unstick_distance) && (right_unstick_distance > minimum_unstick_distance)) {
-        logf("unstuck\n");
+        logf("unstuck");
         unsticking = false;
       } else {
         left_motor.go(-1);
@@ -777,6 +840,26 @@ void setup() {
   log_msg.data.capacity = 200;
   log_msg.data.size = 0;
 
+  // preallocate log_msg_ros for all ros logging
+  rosout_msg.level = rcl_interfaces__msg__Log__INFO;
+  rosout_msg.name.data = (char *)malloc(20);
+  rosout_msg.name.capacity = 20;
+  strncpy(rosout_msg.name.data, "white_crash", 20);
+  rosout_msg.name.size = strlen("white_crash");
+  rosout_msg.msg.data = (char *)malloc(200);
+  rosout_msg.msg.capacity = 200;
+  rosout_msg.msg.size = 0;
+  rosout_msg.file.data = (char *)malloc(20);
+  rosout_msg.file.capacity = 20;
+  strncpy(rosout_msg.file.data, "", 20);
+  rosout_msg.file.size = 0;
+  rosout_msg.function.data = (char *)malloc(20);
+  rosout_msg.function.capacity = 20;
+  strncpy(rosout_msg.function.data, "", 20);
+  rosout_msg.function.size = 0;
+  rosout_msg.line = 0;
+
+
   tof_distance_msg.header.frame_id.data = (char *)malloc(20);
   tof_distance_msg.header.frame_id.capacity = 20;
   strncpy(tof_distance_msg.header.frame_id.data, "tof_frame", 20);
@@ -800,7 +883,7 @@ void setup() {
 
   fsm.begin();
 
-  Serial.write("tank-train\n");
+  Serial.write("white_crash\n");
   crsf_serial.setRxBufferSize(4096);
   crsf_serial.begin(420000, SERIAL_8N1, pin_crsf_rx, pin_crsf_tx);
   gnss_serial.setRxBufferSize(4096);
@@ -885,7 +968,7 @@ class HangChecker {
     unsigned long now = millis();
     int elapsed = now - start_ms;
     if (elapsed > timeout_ms) {
-      logf("HANG: %s", name);
+      logf(Severity::WARN, "HANG: %s took %d ms", name, elapsed);
     }
   }
 };
@@ -952,12 +1035,9 @@ void loop() {
           }
         }
         if (ros_ready)
-        {  
-          struct timespec ts;
-          clock_gettime(CLOCK_REALTIME, &ts);
-          tof_distance_msg.header.stamp.sec = ts.tv_sec;
-          tof_distance_msg.header.stamp.nanosec =ts.tv_nsec;
-      
+        {
+          set_stamp(tof_distance_msg.header.stamp);
+
           tof_distance_msg.range = tof->distance;    
           RCSOFTCHECK(rcl_publish(&(tof->publisher), &tof_distance_msg, NULL));
         }    
@@ -983,7 +1063,7 @@ void loop() {
   }
 
 
-  if (every_1000_ms) {
+  if (every_100_ms) {
     HangChecker hc("encoders");
     // logf("Encoders left: %fm (%d,%d) right: %fm (%d,%d) ms: %d, %d",
     //     left_encoder.get_meters(),
@@ -1157,3 +1237,4 @@ void loop() {
 
   digitalWrite(pin_test, !digitalRead(pin_test));
 }
+
