@@ -720,7 +720,6 @@ std::vector<Fsm::Edge> edges = {
 Fsm fsm(tasks, edges);
 
 void ros_thread(void *arg) {
-  delay(5000); // sleep to allow for serial monitor to connect
   // setup_micro_ros_wifi will hang if it can't connect towifi
   // calling in a separate thread allows the rest of the system to continue
   setup_micro_ros_wifi();
