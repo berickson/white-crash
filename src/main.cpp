@@ -279,7 +279,7 @@ void destroy_ros_node_and_publishers() {
 
 
 
-void setup_micro_ros() {
+void setup_micro_ros_wifi() {
   Serial.printf("setting up micro ros\n");
   IPAddress agent_ip(192, 168, 86, 66);
   size_t agent_port = 8888;
@@ -290,25 +290,8 @@ void setup_micro_ros() {
   
   set_microros_wifi_transports(ssid, psk, agent_ip, agent_port);
 
-
-  // delay(2000);
-  // uint32_t timeout_ms = 1000;
-  // rmw_uros_sync_session(timeout_ms);
-
   allocator = rcl_get_default_allocator();
   configTime(0, 0, "pool.ntp.org");
-
-  // connect to micro-ros agent
-  while (rclc_support_init(&support, 0, NULL, &allocator) != RCL_RET_OK) {
-    Serial.printf("failed to init support, verify that micro-ros-agent is running at %s:%d \n", agent_ip.toString().c_str(), agent_port);
-    delay(1000);
-  }
-
-  create_ros_node_and_publishers();
-
-
-  Serial.printf("micro ros initialized\n");
-  ros_ready = true;
 }
 
 //////////////////////////////////
@@ -675,24 +658,25 @@ Fsm fsm(tasks, edges);
 
 void ros_thread(void *arg) {
   delay(5000); // sleep to allow for serial monitor to connect
-  // setup_micro_ros will hang if it can't connect to the agent or wifi
+  // setup_micro_ros_wifi will hang if it can't connect towifi
   // calling in a separate thread allows the rest of the system to continue
-  setup_micro_ros();
+  setup_micro_ros_wifi();
 
+  // connect, montior connection, and reconnect if necessary
   while (true) {
     while (ros_ready == false) {
-      Serial.printf("Attempting to reconnect to micro-ROS agent\n");
+      Serial.printf("Attempting to connect to micro-ROS agent\n");
       if (rclc_support_init(&support, 0, NULL, &allocator) == RCL_RET_OK) {
         create_ros_node_and_publishers();    
         ros_ready = true;
-        logf("Reconnected to micro-ROS agent");
+        logf("Connected to micro-ROS agent");
       } else {
         delay(1000);
       }
     }
     // make sure ros is still connected
     const int timout_ms = 100;
-    if (rmw_uros_ping_agent(timout_ms, 2) != RMW_RET_OK) {
+    if (rmw_uros_ping_agent(timout_ms, 10) != RMW_RET_OK) {
       ros_ready = false;
       Serial.printf("Lost connection to ROS agent\n");
       Serial.printf("Shutting down rclc_support\n");
@@ -702,11 +686,6 @@ void ros_thread(void *arg) {
     }
 
     delay(100); // sleep to allow other tasks to run
-  }
-
-  while (true) {
-    RCSOFTCHECK(rcl_publish(&battery_publisher, &battery_msg, NULL));
-    delay(1000);
   }
 }
 
@@ -798,9 +777,11 @@ void setup() {
   log_msg.data.capacity = 200;
   log_msg.data.size = 0;
 
-  tof_distance_msg.header.frame_id.data = const_cast<char *>("tof");
-  tof_distance_msg.header.frame_id.size = 3;
-  tof_distance_msg.header.frame_id.capacity = 3;
+  tof_distance_msg.header.frame_id.data = (char *)malloc(20);
+  tof_distance_msg.header.frame_id.capacity = 20;
+  strncpy(tof_distance_msg.header.frame_id.data, "tof_frame", 20);
+  tof_distance_msg.header.frame_id.size = strlen("tof_frame");
+
   tof_distance_msg.min_range = 0.03;
   tof_distance_msg.max_range = 1.0;
   tof_distance_msg.radiation_type = sensor_msgs__msg__Range__INFRARED;
@@ -992,7 +973,13 @@ void loop() {
 
   if (use_gnss && every_1000_ms) {
     gnss.getFixType();
-    Serial.printf("gps fix type: %d\n", gnss.getFixType()); 
+//    Serial.printf("gps fix type: %d\n", gnss.getFixType()); 
+  }
+
+  if (every_1000_ms) {
+    if (ros_ready) {
+      RCSOFTCHECK(rcl_publish(&battery_publisher, &battery_msg, NULL));
+    }
   }
 
 
