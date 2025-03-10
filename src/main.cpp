@@ -1095,7 +1095,7 @@ void loop() {
 
 // In your logging code, add more debug info:
 if (use_gnss && every_1000_ms) {
-  logf("gps date: (%d) %d-%d-%d %02d:%02d:%02d fix: %d siv: %d",
+  logf("gps date: (%d) %d-%d-%d %02d:%02d:%02d (%f,%f) fix: %d siv: %d",
     gnss.getTimeValid(0),
     gnss.getYear(0),
     gnss.getMonth(0),
@@ -1103,7 +1103,9 @@ if (use_gnss && every_1000_ms) {
     gnss.getHour(0),
     gnss.getMinute(0),
     gnss.getSecond(0),
-    gnss.getFixType(),
+    gnss.getFixType(0),
+    gnss.getLatitude(0) * 1e-7,
+    gnss.getLongitude(0) * 1e-7,
     gnss.getSIV(0)  // Satellites in view
   );
 }
