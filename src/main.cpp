@@ -26,6 +26,9 @@
 #include <std_msgs/msg/string.h>
 #include <sensor_msgs/msg/range.h>
 
+#include <white_crash_msgs/msg/update.h>
+
+
 #include "RunStatistics.h"
 #include "StuckChecker.h"
 #include "secrets/wifi_login.h"
@@ -46,7 +49,7 @@ class Severity {
 const bool use_gnss = true; // sparkfun ublox
 const bool use_gps = false;  // tinygps
 const bool enable_stats_logging = false;
-const bool avoid_collisions = true;
+const bool avoid_collisions = false;
 
 // calibration constants
 //float meters_per_odometer_tick = 0.00008204; // S
@@ -199,10 +202,13 @@ StuckChecker right_stuck_checker;
 rcl_publisher_t log_publisher;
 rcl_publisher_t rosout_publisher;
 rcl_publisher_t battery_publisher;
+rcl_publisher_t update_publisher;
+
 sensor_msgs__msg__Range tof_distance_msg;
 std_msgs__msg__String log_msg;
 std_msgs__msg__Float32 battery_msg;
 rcl_interfaces__msg__Log rosout_msg;
+white_crash_msgs__msg__Update update_msg;
 
 rclc_support_t support;
 rcl_allocator_t allocator;
@@ -310,6 +316,12 @@ void create_ros_node_and_publishers() {
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
       "/white_crash/battery"));
   
+  RCCHECK(rclc_publisher_init_best_effort(
+      &update_publisher,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(white_crash_msgs, msg, Update),
+      "/white_crash/update"));
+  
   for (auto tof : tof_sensors) {
     char topic[30];
     snprintf(topic, sizeof(topic), "/white_crash/%s_distance", tof->name);
@@ -325,6 +337,8 @@ void create_ros_node_and_publishers() {
 void destroy_ros_node_and_publishers() { 
   RCCHECK(rcl_publisher_fini(&log_publisher, &node));
   RCCHECK(rcl_publisher_fini(&battery_publisher, &node));
+  RCCHECK(rcl_publisher_fini(&rosout_publisher, &node));
+  RCCHECK(rcl_publisher_fini(&update_publisher, &node));
   for (auto tof : tof_sensors) {
     RCCHECK(rcl_publisher_fini(&tof->publisher, &node));
   }
@@ -1025,6 +1039,19 @@ void loop() {
   if (every_10_ms) {
     left_speedometer.update_from_sensor(micros(), left_encoder.odometer_a, left_encoder.last_odometer_a_us, left_encoder.odometer_b, left_encoder.last_odometer_b_us);
     right_speedometer.update_from_sensor(micros(), right_encoder.odometer_a, right_encoder.last_odometer_a_us, right_encoder.odometer_b, right_encoder.last_odometer_b_us);
+
+    update_msg.battery_voltage = v_bat;
+    update_msg.left_speed = left_speedometer.get_velocity();
+    update_msg.right_speed = right_speedometer.get_velocity();
+    update_msg.left_motor_command = left_motor.get_setpoint();
+    update_msg.right_motor_command = right_motor.get_setpoint();
+    update_msg.rx_esc = crsf_ns::crsf_rc_channel_to_float(rx_esc);
+    update_msg.rx_str = crsf_ns::crsf_rc_channel_to_float(rx_str);
+
+    if (ros_ready) {
+      // publish update message
+      RCSOFTCHECK(rcl_publish(&update_publisher, &update_msg, NULL));
+    }
   }
 
 
