@@ -1,7 +1,7 @@
 Todo
 o Upgrade 3d chassis
 - Upgrade to dual core ESP-32 D mini (test first)
-- Bearing rear wheels w/ external fixed axles
+- Bearing rear wheels w/ external adjustable axles
 - Bigger wheels
 - Aim tof sensors upward
 - Battry strap instead of battery tray
