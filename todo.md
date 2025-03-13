@@ -1,10 +1,20 @@
 Todo
+o Upgrade 3d chassis
+- Upgrade to dual core ESP-32 D mini (test first)
+- Bearing rear wheels w/ external fixed axles
+- Bigger wheels
+- Aim tof sensors upward
+- Battry strap instead of battery tray
+- Battery Compartment:  You shouldn't have to remove the body to change the battery
+- Switch should go on chassis
+- Longer chassis? High-center inverted V?
+
+
 - micro-ros-agent errors, eprosima::fastcdr::exception::BadParamException, etc.
 - faster gps library
 - set waypoints from radio control
 - test with remote network and laptop (no home network)
 - Auto add intermediate waypoints if they are spaced too far apart
-- Battery Compartment:  You shouldn't have to remove the body to change the battery
 - Electronic on switch
 - Battery mounts for LiPo and/or hold in the LiIon better so they don't fall out when you go upside down
 - Power switch on Chassis instead of lid
