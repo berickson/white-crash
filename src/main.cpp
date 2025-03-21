@@ -849,7 +849,6 @@ void setup() {
 
   SPIFFS.begin();
 
-  sleep(5); // wait for serial monitor to connect
 
   // preallocate log message for all logging
   log_msg.data.data = (char *)malloc(200);
@@ -1036,7 +1035,7 @@ void loop() {
   bool every_200_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 200);
   bool every_1000_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 1000);
 
-  if (every_10_ms) {
+  if (every_100_ms) {
     left_speedometer.update_from_sensor(micros(), left_encoder.odometer_a, left_encoder.last_odometer_a_us, left_encoder.odometer_b, left_encoder.last_odometer_b_us);
     right_speedometer.update_from_sensor(micros(), right_encoder.odometer_a, right_encoder.last_odometer_a_us, right_encoder.odometer_b, right_encoder.last_odometer_b_us);
 
@@ -1079,7 +1078,15 @@ void loop() {
         {
           set_stamp(tof_distance_msg.header.stamp);
 
-          tof_distance_msg.range = tof->distance;    
+          tof_distance_msg.range = tof->distance;
+          if (tof_distance_msg.radiation_type != sensor_msgs__msg__Range__INFRARED) {
+            logf( 
+              Severity::ERROR, 
+              "tof_distance_msg.radiation_type != sensor_msgs__msg__Range__INFRARED, value: %d", 
+              tof_distance_msg.radiation_type);
+            
+            tof_distance_msg.radiation_type = sensor_msgs__msg__Range__INFRARED;
+          }    
           RCSOFTCHECK(rcl_publish(&(tof->publisher), &tof_distance_msg, NULL));
         }    
       }
