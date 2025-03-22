@@ -349,6 +349,7 @@ void destroy_ros_node_and_publishers() {
 
 
 void setup_micro_ros_wifi() {
+  delay(5000); // wait for serial monitor to connect
   Serial.printf("setting up micro ros\n");
   IPAddress agent_ip(192, 168, 86, 66);
   size_t agent_port = 8888;
@@ -361,6 +362,53 @@ void setup_micro_ros_wifi() {
 
   allocator = rcl_get_default_allocator();
   configTime(0, 0, "pool.ntp.org");
+
+  // set gnss time to ntp time utc
+  struct tm timeinfo;
+  struct timeval tv;
+  if (gettimeofday(&tv, NULL) != 0) {
+    Serial.println("Failed to obtain time");
+    return;
+  }
+
+  gmtime_r(&tv.tv_sec, &timeinfo);  // Convert to UTC time structure
+
+  // print all fields of timeinfo
+  Serial.printf("UTC time: %d-%02d-%02d %02d:%02d:%02d\n",
+                timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+                timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+
+
+  // Set GPS time using UTC values from timeinfo with microsecond precision
+  if (gnss.setUTCTimeAssistance(
+    timeinfo.tm_year + 1900,    // Years since 1900
+    timeinfo.tm_mon + 1,        // Months since January (0-11)
+    timeinfo.tm_mday,           // Day of month
+    timeinfo.tm_hour,           // Hour (0-23)
+    timeinfo.tm_min,            // Minutes
+    timeinfo.tm_sec,            // Seconds
+    tv.tv_usec * 1000,         // Convert microseconds to nanoseconds
+    1
+
+  )) {
+    Serial.println("Time assistance successful with ns precision");
+  } else {
+    Serial.println("Time assistance failed");
+  }
+    // Set approximate position assistance
+    // Convert degrees to degrees * 1E-7 for u-blox
+    int32_t lat = sidewalk_in_front_of_driveway.lat * 1E7;
+    int32_t lon = sidewalk_in_front_of_driveway.lon * 1E7;
+    int32_t alt = 10 * 100; // ~10m altitude in centimeters
+    uint32_t posAcc = 5000;  // 50m accuracy in centimeters
+
+    if (gnss.setPositionAssistanceLLH(lat, lon, alt, posAcc)) {
+        Serial.println("Position assistance successful");
+    } else {
+        Serial.println("Position assistance failed");
+    }
+
+    gnss.saveConfiguration();
 }
 
 //////////////////////////////////
@@ -415,8 +463,7 @@ bool go_toward_lat_lon(lat_lon destination, float * meters_to_next_waypoint) {
 
   const float max_speed = 0.5;
 
-
-  if (gnss.getGnssFixOk(0) == 0) {
+  if (gnss.getLatitude(0) == 0) {
     left_motor.go(0);
     right_motor.go(0);
     return false;
@@ -902,32 +949,39 @@ void setup() {
   crsf_serial.setRxBufferSize(4096);
   crsf_serial.begin(420000, SERIAL_8N1, pin_crsf_rx, pin_crsf_tx);
   gnss_serial.setRxBufferSize(4096);
+
   gnss_serial.begin(115200, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
 
   // In setup(), after gnss.begin():
   if (use_gnss) {
-    if (gnss.begin(gnss_serial)) {
+    if (gnss.begin(gnss_serial, 2000, true)) {
       // Configure message output
       gnss.setUART1Output(COM_TYPE_NMEA);
       gnss.enableNMEAMessage(UBX_NMEA_RMC, COM_PORT_UART1);  // Time and date
       gnss.enableNMEAMessage(UBX_NMEA_GGA, COM_PORT_UART1);  // Fix data
       gnss.enableNMEAMessage(UBX_NMEA_ZDA, COM_PORT_UART1);  // Precise time/date
 
-      gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GPS);
-      gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GALILEO);  // Enable Galileo
+      // Enable multiple GNSS constellations
+      gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GPS);     // GPS USA
+      gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GALILEO); // Galileo Europe
+      gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_BEIDOU);  // BeiDou China
+      gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GLONASS); // GLONASS Russia
+
+      // pedestrian more appropriate for slow speeds
+      gnss.setDynamicModel(DYN_MODEL_PEDESTRIAN);
 
       // Configure time base and update rate
       gnss.setMeasurementRate(100);     // Measurements every 100ms
       gnss.setNavigationFrequency(10);  // Navigation rate 10Hz
-
-      // Enable time pulse (PPS)
-      gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GPS);
 
       // Save configuration
       bool success = gnss.saveConfiguration();
       Serial.printf("GPS configuration %s\n", success ? "saved" : "failed to save");
 
       Serial.println("GPS configured");
+    }
+    else {
+      Serial.println("GPS failed to initialize");
     }
   }
 
@@ -1137,9 +1191,9 @@ if (use_gnss && every_1000_ms) {
     gnss.getHour(0),
     gnss.getMinute(0),
     gnss.getSecond(0),
-    gnss.getFixType(0),
     gnss.getLatitude(0) * 1e-7,
     gnss.getLongitude(0) * 1e-7,
+    gnss.getFixType(0),
     gnss.getSIV(0)  // Satellites in view
   );
 }
@@ -1316,7 +1370,7 @@ if (use_gnss && every_1000_ms) {
     crsf.send_flight_mode(display_string);
     crsf.send_attitude(0, 0, compass.getAzimuth());
 
-    if (use_gnss && gnss.getGnssFixOk(0)) {
+    if (use_gnss) {
       crsf.send_gps(
           gnss.getLatitude(0),
           gnss.getLongitude(0),
