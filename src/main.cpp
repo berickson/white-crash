@@ -86,12 +86,17 @@ const char *compass_calibration_file_path = "/compass_calibration.txt";
 //////////////////////////////////
 // pin assignments
 
+
+// Live ESP32 Mini Kit 32
+
+// S2 Mini
+
 const int pin_right_rev = 2;
 const int pin_right_fwd = 3;
 const int pin_left_rev = 4;
 const int pin_left_fwd = 5;
 
-const int pin_left_tof_power = 6;
+const int pin_left_tof_power = 6; 
 const int pin_center_tof_power = 7;
 const int pin_right_tof_power = 13;
 
@@ -543,20 +548,33 @@ void update_motor_speeds() {
     return;
   }
 
-  double speed = crsf_ns::crsf_rc_channel_to_float(rx_esc);
-  double str_speed = crsf_ns::crsf_rc_channel_to_float(rx_str);
+  float speed = crsf_ns::crsf_rc_channel_to_float(rx_esc);
+  float str_speed = crsf_ns::crsf_rc_channel_to_float(rx_str);
 
-  if (avoid_collisions) {
-    // if we are moving forward and the tof is less than 0.9 meters, limit speed to avoid collision
-    auto collision_distance = min(tof_left.distance, min(tof_center.distance, tof_right.distance));
-    if (speed > 0 && !isnan(tof_center.distance) && collision_distance < 0.9) {
-      auto max_speed = min(speed, collision_distance  - 0.1);
+  // only avoid collisions when moving forward
+  if (avoid_collisions && speed > 0) {
+    // if we are moving forward and the tof is less than 0.9 meters, turn or slow to avoid collions
+    bool collision_ahead = tof_center.distance < 0.9;
+    bool collision_right = tof_right.distance < 0.9;
+    bool collision_left = tof_left.distance < 0.9;
+    float collision_distance = std::min(tof_center.distance, std::min(tof_right.distance, tof_left.distance));
+
+    float left_distance = isnan(tof_left.distance) ? std::numeric_limits<float>::max() : tof_left.distance;
+    float right_distance = isnan(tof_right.distance) ? std::numeric_limits<float>::max() : tof_right.distance;
+
+    // turn or slow to avoid collisions
+    if (collision_right && (right_distance < left_distance)) {
+      str_speed = -0.25;
+    } else if (collision_left && (left_distance < right_distance)) {
+      str_speed = 0.25;
+    } else if (collision_right && collision_left || collision_ahead) {
+      auto max_speed = min(speed, collision_distance  - 0.1f);
       if (max_speed < 0) {
         max_speed = 0;
       }
-
+      
       speed = max_speed;
-    }
+    } 
   }
 
   // don't move if speed is too low
