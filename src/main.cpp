@@ -89,6 +89,9 @@ const char *compass_calibration_file_path = "/compass_calibration.txt";
 
 // Live ESP32 Mini Kit 32
 // see https://doc.riot-os.org/group__boards__esp32__mh-et-live-minikit.html
+
+// pins broken out on the board
+
 const int pin_clk_dont_use = 6;
 const int pin_cmd_dont_use = 11;
 const int pin_gpio_0 = 0;
@@ -107,6 +110,7 @@ const int pin_gpio_25 = 25;
 const int pin_gpio_26 = 26;
 const int pin_gpio_27 = 27;
 const int pin_gpio_32 = 32;
+const int pin_gpio_33 = 33;
 const int pin_gpio_34_input_only = 34;
 const int pin_gpio_35_input_only = 35;
 //const int pin_gpio_36_input_only = 36;
@@ -124,39 +128,49 @@ const int pin_tdo = 15; // ok (used for JTAG)
 const int pin_tms = 14; // ok (used for JTAG)
 const int pin_tx_dont_use = 1; // used for USB serial
 
+// pins mapping / connections
+
 const int pin_tof_sda = pin_gpio_2; // yellow
 const int pin_tof_scl = pin_gpio_0; // blue
 const int pin_compass_sda = pin_gpio_4; // white
 const int pin_compass_scl = pin_gpio_16; // blue
-const int pin_right_encoder_a = pin_tdi;  // green
-const int pin_right_encoder_b = pin_gpio_17;  // yellow
-const int pin_left_encoder_b = pin_gpio_32; // green
-const int pin_left_encoder_a = pin_gpio_21; // yellow
+
+const int pin_crsf_rx = pin_tdi; // green
+const int pin_crsf_tx = pin_gpio_17; // white
+
 
 const int pin_gps_tx = pin_gpio_25; // green
 const int pin_gps_rx = pin_gpio_22; // yellow
 
+const int pin_battery_voltage = pin_svp_input_only; // blue
+
+
+const int pin_right_encoder_a = pin_gpio_35_input_only; // ;  // green
+const int pin_right_encoder_b = pin_svn_input_only;  // yellow
+
+const int pin_left_encoder_b = pin_gpio_34_input_only; // green
+const int pin_left_encoder_a = pin_gpio_33; // yellow
+
+const int pin_left_rev = pin_gpio_32;  // blue
+const int pin_left_fwd = pin_gpio_21;  // green
+const int pin_right_rev = pin_gpio_26; // blue
+const int pin_right_fwd = pin_gpio_18; // green
+
+ 
 // S2 Mini
 
-const int pin_right_rev = 2;
-const int pin_right_fwd = 3;
-const int pin_left_rev = 4;
-const int pin_left_fwd = 5;
 
-const int pin_left_tof_power = 6; 
-const int pin_center_tof_power = 7;
-const int pin_right_tof_power = 13;
+const int pin_left_tof_power = pin_gpio_19; // 6; 
+const int pin_center_tof_power = pin_gpio_23;// 7;
+const int pin_right_tof_power = pin_gpio_5;//13;
 
 const int pin_test = 8;
 
 
 const int pin_built_in_led = 15;
-const int pin_battery_voltage = 14;
 
 
 
-const int pin_crsf_rx = 39; // green
-const int pin_crsf_tx = 38; // yellow
 
 //////////////////////////////////
 // i2c addresses
