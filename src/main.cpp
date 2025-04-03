@@ -88,6 +88,53 @@ const char *compass_calibration_file_path = "/compass_calibration.txt";
 
 
 // Live ESP32 Mini Kit 32
+// see https://doc.riot-os.org/group__boards__esp32__mh-et-live-minikit.html
+const int pin_clk_dont_use = 6;
+const int pin_cmd_dont_use = 11;
+const int pin_gpio_0 = 0;
+const int pin_gpio_2 = 2;
+const int pin_gpio_4 = 4;
+const int pin_gpio_5 = 5;
+const int pin_gpio_12 = 12;
+const int pin_gpio_16 = 16;
+const int pin_gpio_17 = 17;
+const int pin_gpio_18 = 18;
+const int pin_gpio_19 = 19;
+const int pin_gpio_21 = 21;
+const int pin_gpio_22 = 22;
+const int pin_gpio_23 = 23;
+const int pin_gpio_25 = 25;
+const int pin_gpio_26 = 26;
+const int pin_gpio_27 = 27;
+const int pin_gpio_32 = 32;
+const int pin_gpio_34_input_only = 34;
+const int pin_gpio_35_input_only = 35;
+//const int pin_gpio_36_input_only = 36;
+//const int pin_gpio_39_input_only = 39;
+const int pin_rx_dont_use = 3; // used for USB serial
+const int pin_sd0_dont_use = 7;  // reboots the board if used
+const int pin_sd1_dont_use = 8;  
+const int pin_sd2_dont_use = 9;  // reboots the board if used
+const int pin_sd3_dont_use = 10; // probably bad to use, could interfere with boot, could be used as output after boot if careful
+const int pin_svn_input_only = 39; // GPIO 39 (SVN) for analog input
+const int pin_svp_input_only = 36; // GPIO 36 (SVP) for analog input
+const int pin_tck = 13; // ok (used for JTAG)
+const int pin_tdi = 12; // ok (used for JTAG)
+const int pin_tdo = 15; // ok (used for JTAG)
+const int pin_tms = 14; // ok (used for JTAG)
+const int pin_tx_dont_use = 1; // used for USB serial
+
+const int pin_tof_sda = pin_gpio_2; // yellow
+const int pin_tof_scl = pin_gpio_0; // blue
+const int pin_compass_sda = pin_gpio_4; // white
+const int pin_compass_scl = pin_gpio_16; // blue
+const int pin_right_encoder_a = pin_tdi;  // green
+const int pin_right_encoder_b = pin_gpio_17;  // yellow
+const int pin_left_encoder_b = pin_gpio_32; // green
+const int pin_left_encoder_a = pin_gpio_21; // yellow
+
+const int pin_gps_tx = pin_gpio_25; // green
+const int pin_gps_rx = pin_gpio_22; // yellow
 
 // S2 Mini
 
@@ -100,24 +147,16 @@ const int pin_left_tof_power = 6;
 const int pin_center_tof_power = 7;
 const int pin_right_tof_power = 13;
 
-const int pin_compass_sda = 18;
-const int pin_compass_scl = 21;
 const int pin_test = 8;
-const int pin_tof_sda = 16;
-const int pin_tof_scl = 17;
+
 
 const int pin_built_in_led = 15;
 const int pin_battery_voltage = 14;
 
 
-const int pin_right_encoder_a = 33;
-const int pin_right_encoder_b = 34;
-const int pin_left_encoder_b = 35;
-const int pin_left_encoder_a = 36;
-const int pin_gps_rx = 38;
-const int pin_gps_tx = 37;
-const int pin_crsf_rx = 39;
-const int pin_crsf_tx = 40;
+
+const int pin_crsf_rx = 39; // green
+const int pin_crsf_tx = 38; // yellow
 
 //////////////////////////////////
 // i2c addresses
