@@ -92,13 +92,14 @@ const char *compass_calibration_file_path = "/compass_calibration.txt";
 
 // pins broken out on the board
 
+const int pin_built_in_led = 2; // ok
 const int pin_clk_dont_use = 6;
 const int pin_cmd_dont_use = 11;
-const int pin_gpio_0 = 0;
-const int pin_gpio_2 = 2;
+const int pin_gpio_0_dont_use = 0;
+// const int pin_gpio_2 = 2;
 const int pin_gpio_4 = 4;
 const int pin_gpio_5 = 5;
-const int pin_gpio_12 = 12;
+// const int pin_gpio_12 = 12;
 const int pin_gpio_16 = 16;
 const int pin_gpio_17 = 17;
 const int pin_gpio_18 = 18;
@@ -123,20 +124,20 @@ const int pin_sd3_dont_use = 10; // probably bad to use, could interfere with bo
 const int pin_svn_input_only = 39; // GPIO 39 (SVN) for analog input
 const int pin_svp_input_only = 36; // GPIO 36 (SVP) for analog input
 const int pin_tck = 13; // ok (used for JTAG)
-const int pin_tdi = 12; // ok (used for JTAG)
+const int pin_tdi_output_only = 12; // ok (used for JTAG)
 const int pin_tdo = 15; // ok (used for JTAG)
 const int pin_tms = 14; // ok (used for JTAG)
 const int pin_tx_dont_use = 1; // used for USB serial
 
 // pins mapping / connections
 
-const int pin_tof_sda = pin_gpio_2; // yellow
-const int pin_tof_scl = pin_gpio_0; // blue
-const int pin_compass_sda = pin_gpio_4; // white
-const int pin_compass_scl = pin_gpio_16; // blue
+const int pin_sda = pin_gpio_4; // yellow
+const int pin_scl = pin_gpio_16; // blue
+//const int pin_compass_sda = pin_gpio_4; // white
+// const int pin_compass_scl = pin_gpio_16; // blue
 
-const int pin_crsf_rx = pin_tdi; // green
-const int pin_crsf_tx = pin_gpio_17; // white
+const int pin_crsf_rx = pin_gpio_17; // green
+const int pin_crsf_tx = pin_tdi_output_only; // white
 
 
 const int pin_gps_tx = pin_gpio_25; // green
@@ -160,14 +161,13 @@ const int pin_right_fwd = pin_gpio_18; // green
 // S2 Mini
 
 
-const int pin_left_tof_power = pin_gpio_19; // 6; 
-const int pin_center_tof_power = pin_gpio_23;// 7;
-const int pin_right_tof_power = pin_gpio_5;//13;
-
-const int pin_test = 8;
+const int pin_left_tof_power = pin_gpio_19; 
+const int pin_center_tof_power = pin_gpio_23;
+const int pin_right_tof_power = pin_gpio_5;
 
 
-const int pin_built_in_led = 15;
+
+
 
 
 
@@ -183,8 +183,8 @@ const uint8_t right_tof_i2c_address = 0x16;
 
 DRV8833 left_motor;
 DRV8833 right_motor; 
-HardwareSerial crsf_serial(0);
-HardwareSerial gnss_serial(1);
+HardwareSerial crsf_serial(1);
+HardwareSerial gnss_serial(2);
 TinyGPSPlus gps;  // currently only used for distanceBetween and courseTo
 SFE_UBLOX_GNSS gnss;
 VL53L1X left_tof_distance_sensor_raw;
@@ -927,7 +927,7 @@ bool load_compass_calibration_from_spiffs() {
 void start_tof_distance_sensor(TofSensor & tof) {
   pinMode(tof.power_pin, OUTPUT);
   digitalWrite(tof.power_pin, HIGH);
-  tof.sensor->setBus(&Wire1);
+  tof.sensor->setBus(&Wire);
   bool use_2v8 = false;
   delay(50);
   while (!tof.sensor->init(use_2v8)) {
@@ -955,6 +955,18 @@ void turn_off_tof_distance_sensor(TofSensor & tof) {
   digitalWrite(tof.power_pin, LOW);
   tof.running = false;
   tof.turn_off_ms = millis();
+}
+
+void flash_forever() {
+  pinMode(pin_built_in_led, OUTPUT);
+  while(true) {
+    Serial.println("off");
+    digitalWrite(pin_built_in_led, LOW);
+    delay(250);
+    Serial.println("on");
+    digitalWrite(pin_built_in_led, HIGH);
+    delay(250);
+  }
 }
 
 //////////////////////////////////
@@ -1003,13 +1015,14 @@ void setup() {
   tof_distance_msg.radiation_type = sensor_msgs__msg__Range__INFRARED;
   tof_distance_msg.field_of_view = 27 * M_PI / 180; // 27 degrees
 
-  Wire.setPins(pin_compass_sda, pin_compass_scl);
+  Wire.setPins(pin_sda, pin_scl);
   Wire.begin();
   Wire.setTimeOut(5); // ms
 
-  Wire1.setPins(pin_tof_sda, pin_tof_scl);
-  Wire1.begin();
-  Wire1.setTimeOut(5); // ms
+
+  //Wire1.setPins(pin_tof_sda, pin_tof_scl);
+  //Wire1.begin();
+  //Wire1.setTimeOut(5); // ms
 
   left_speedometer.meters_per_tick = meters_per_odometer_tick;
   right_speedometer.meters_per_tick = meters_per_odometer_tick;
@@ -1057,15 +1070,16 @@ void setup() {
   }
 
   compass.init();
-  if (!load_compass_calibration_from_spiffs()) {
+  if (false && !load_compass_calibration_from_spiffs()) {
     compass.setCalibration(-950, 675, -1510, 47, 0, 850);
   }
   // see https://www.magnetic-declination.com/
   compass.setMagneticDeclination(11, 24);
 
-  start_tof_distance_sensor(tof_left);
-  start_tof_distance_sensor(tof_right);
-  start_tof_distance_sensor(tof_center);
+
+  // start_tof_distance_sensor(tof_left);
+  // start_tof_distance_sensor(tof_right);
+  // start_tof_distance_sensor(tof_center);
 
   // quadrature encoders
 
@@ -1082,20 +1096,21 @@ void setup() {
 
   left_motor.init(pin_left_fwd, pin_left_rev);
   right_motor.init(pin_right_fwd, pin_right_rev);
-  pinMode(pin_test, OUTPUT);
+  // pinMode(pin_test, OUTPUT);
   pinMode(pin_built_in_led, OUTPUT);
   pinMode(pin_battery_voltage, INPUT);
 
   // create a thread for ros stuff
-  xTaskCreatePinnedToCore(
-      ros_thread,
-      "ros_thread",
-      8192,
-      NULL,
-      1,
-      NULL,
-      1);
-
+  if(false) {
+    xTaskCreatePinnedToCore(
+        ros_thread,
+        "ros_thread",
+        16384,
+        NULL,
+        1,
+        NULL,
+        1);
+  }
   // reset all serial data
   uart_flush_input(0);
   uart_flush_input(1);
@@ -1149,6 +1164,7 @@ uint8_t estimate_lipo_battery_percent_from_voltage(float v) {
 }
 
 void loop() {
+
   delay(1); // give the system a little time to breathe
   BlockTimer bt(loop_stats);
   last_loop_time_ms = loop_time_ms;
@@ -1180,7 +1196,7 @@ void loop() {
 
 
   // tof distance
-  if (every_n_ms(last_loop_time_ms, loop_time_ms, tof_timing_budget_ms)) {
+  if (false && every_n_ms(last_loop_time_ms, loop_time_ms, tof_timing_budget_ms)) {
     for (auto tof : tof_sensors) {
       // extra block to limit scope of BlockTimer
       {
@@ -1453,7 +1469,5 @@ if (use_gnss && every_1000_ms) {
       crsf.send_gps(0, 0, 0, 0, 0, 0);
     }
   }
-
-  digitalWrite(pin_test, !digitalRead(pin_test));
 }
 
