@@ -145,7 +145,7 @@ const int pin_battery_voltage = pin_svp_input_only; // blue
 
 
 const int pin_right_encoder_a = pin_gpio_35_input_only; // ;  // green
-const int pin_right_encoder_b = pin_svn_input_only;  // yellow
+const int pin_right_encoder_b = pin_gpio_27;  // yellow
 
 const int pin_left_encoder_b = pin_gpio_34_input_only; // green
 const int pin_left_encoder_a = pin_gpio_33; // yellow
@@ -1095,8 +1095,15 @@ void setup() {
   left_motor.init(pin_left_fwd, pin_left_rev);
   right_motor.init(pin_right_fwd, pin_right_rev);
   // pinMode(pin_test, OUTPUT);
+  digitalWrite(pin_battery_voltage, LOW);
   pinMode(pin_built_in_led, OUTPUT);
   pinMode(pin_battery_voltage, INPUT);
+
+  // The input voltage of ADC will be attenuated, extending 
+  // the range of measurement to up to approx. 2600 mV. 
+  // (1V input = ADC reading of 1575).
+  analogSetPinAttenuation(pin_battery_voltage, ADC_11db); 
+  adcAttachPin(pin_battery_voltage);
 
   // create a thread for ros stuff
   if(true) {
@@ -1338,9 +1345,11 @@ if (use_gnss && every_1000_ms) {
 
 
     // const float v_bat_scale = 0.003714; // white-crash s
-    const float v_bat_scale = 0.0077578 * 7.9 / 30.; // white-crash m    
+    const float v_bat_scale = 0.0077578 * 7.9 / 30. * 7.96 / 3.06; // white-crash m    
     v_bat = v_bat_scale * sum  / sample_count;
     battery_msg.data = v_bat;
+
+    logf("battery voltage: %0.4f, pin_right_a: %d pin_right_b: %d\n", v_bat, digitalRead(pin_right_encoder_a), digitalRead(pin_right_encoder_b));
   }
 
   if (every_100_ms) {
