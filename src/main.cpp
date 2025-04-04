@@ -114,8 +114,6 @@ const int pin_gpio_32 = 32;
 const int pin_gpio_33 = 33;
 const int pin_gpio_34_input_only = 34;
 const int pin_gpio_35_input_only = 35;
-//const int pin_gpio_36_input_only = 36;
-//const int pin_gpio_39_input_only = 39;
 const int pin_rx_dont_use = 3; // used for USB serial
 const int pin_sd0_dont_use = 7;  // reboots the board if used
 const int pin_sd1_dont_use = 8;  
@@ -126,7 +124,7 @@ const int pin_svp_input_only = 36; // GPIO 36 (SVP) for analog input
 const int pin_tck = 13; // ok (used for JTAG)
 const int pin_tdi_output_only = 12; // ok (used for JTAG)
 const int pin_tdo = 15; // ok (used for JTAG)
-const int pin_tms = 14; // ok (used for JTAG)
+const int pin_tms = 14; // ok (used for JTAG) // connecting to GPIO 14 (TMS) is not recommended as it can interfere with the ESP32's boot process.
 const int pin_tx_dont_use = 1; // used for USB serial
 
 // pins mapping / connections
@@ -152,10 +150,10 @@ const int pin_right_encoder_b = pin_svn_input_only;  // yellow
 const int pin_left_encoder_b = pin_gpio_34_input_only; // green
 const int pin_left_encoder_a = pin_gpio_33; // yellow
 
-const int pin_left_rev = pin_gpio_32;  // blue
-const int pin_left_fwd = pin_gpio_21;  // green
-const int pin_right_rev = pin_gpio_26; // blue
-const int pin_right_fwd = pin_gpio_18; // green
+const int pin_left_rev = pin_gpio_21;  // blue
+const int pin_left_fwd = pin_gpio_32;  // green
+const int pin_right_rev = pin_gpio_26;
+const int pin_right_fwd = pin_gpio_18;
 
  
 // S2 Mini
@@ -1070,16 +1068,16 @@ void setup() {
   }
 
   compass.init();
-  if (false && !load_compass_calibration_from_spiffs()) {
+  if (!load_compass_calibration_from_spiffs()) {
     compass.setCalibration(-950, 675, -1510, 47, 0, 850);
   }
   // see https://www.magnetic-declination.com/
   compass.setMagneticDeclination(11, 24);
 
 
-  // start_tof_distance_sensor(tof_left);
-  // start_tof_distance_sensor(tof_right);
-  // start_tof_distance_sensor(tof_center);
+  start_tof_distance_sensor(tof_left);
+  start_tof_distance_sensor(tof_right);
+  start_tof_distance_sensor(tof_center);
 
   // quadrature encoders
 
@@ -1101,7 +1099,7 @@ void setup() {
   pinMode(pin_battery_voltage, INPUT);
 
   // create a thread for ros stuff
-  if(false) {
+  if(true) {
     xTaskCreatePinnedToCore(
         ros_thread,
         "ros_thread",
@@ -1196,7 +1194,7 @@ void loop() {
 
 
   // tof distance
-  if (false && every_n_ms(last_loop_time_ms, loop_time_ms, tof_timing_budget_ms)) {
+  if (every_n_ms(last_loop_time_ms, loop_time_ms, tof_timing_budget_ms)) {
     for (auto tof : tof_sensors) {
       // extra block to limit scope of BlockTimer
       {
@@ -1210,7 +1208,7 @@ void loop() {
               tof->distance = sensor->ranging_data.range_mm / 1000.0;
     
             } else {
-              printf("VL53L1X %s distance status: %d\n", tof->name, sensor->ranging_data.range_status);
+              // printf("VL53L1X %s distance status: %d\n", tof->name, sensor->ranging_data.range_status);
               tof->distance = std::numeric_limits<float>::quiet_NaN();
             }      
           }
@@ -1333,14 +1331,14 @@ if (use_gnss && every_1000_ms) {
     HangChecker hc("battery");
     analogReadResolution(12);
     int sum = 0;
-    const int sample_count = 100;
+    const int sample_count = 30;
     for (int i = 0; i < sample_count; i++) {
       sum += analogRead(pin_battery_voltage);
     }
 
 
     // const float v_bat_scale = 0.003714; // white-crash s
-    const float v_bat_scale = 0.0077578; // white-crash m    
+    const float v_bat_scale = 0.0077578 * 7.9 / 30.; // white-crash m    
     v_bat = v_bat_scale * sum  / sample_count;
     battery_msg.data = v_bat;
   }
