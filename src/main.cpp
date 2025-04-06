@@ -45,6 +45,8 @@ class Severity {
 
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h> // https://github.com/sparkfun/SparkFun_Ublox_Arduino_Library
 
+#include "ak8975.h"
+
 // Feature enable/disable
 const bool use_gnss = true; // sparkfun ublox
 const bool use_gps = false;  // tinygps
@@ -131,8 +133,6 @@ const int pin_tx_dont_use = 1; // used for USB serial
 
 const int pin_sda = pin_gpio_4; // yellow
 const int pin_scl = pin_gpio_16; // blue
-//const int pin_compass_sda = pin_gpio_4; // white
-// const int pin_compass_scl = pin_gpio_16; // blue
 
 const int pin_crsf_rx = pin_gpio_17; // green
 const int pin_crsf_tx = pin_tdi_output_only; // white
@@ -220,7 +220,7 @@ std::vector<TofSensor * > tof_sensors = {
 */
 uint32_t tof_timing_budget_ms = 33;
 
-QMC5883LCompass compass;
+AK8975Compass compass(Wire, 0x0E);
 QuadratureEncoder left_encoder(pin_left_encoder_a, pin_left_encoder_b, meters_per_odometer_tick);
 QuadratureEncoder right_encoder(pin_right_encoder_a, pin_right_encoder_b, meters_per_odometer_tick);
 
@@ -541,7 +541,7 @@ bool go_toward_lat_lon(lat_lon destination, float * meters_to_next_waypoint) {
 
   // subtract courseTo from 360 to get postive ccw
   double desired_bearing_degrees = 360. - gps.courseTo(gnss_lat, gnss_lon, destination.lat, destination.lon);
-  double current_heading_degrees = compass.getAzimuth() + compass_mounting_angle_degrees; // chip is mounted 180 degrees off
+  double current_heading_degrees = compass.get_azimuth_degrees() + compass_mounting_angle_degrees; // chip is mounted 180 degrees off
 
   double heading_error = desired_bearing_degrees - current_heading_degrees;
   while (heading_error > 180) {
@@ -651,7 +651,7 @@ void update_motor_speeds() {
 
 void update_compass_calibration(int min_x, int max_x, int min_y, int max_y, int min_z, int max_z) {
 
-  compass.setCalibration(min_x, max_x, min_y, max_y, min_z, max_z);
+  compass.set_calibration(min_x, max_x, min_y, max_y, min_z, max_z);
   logf("updated compass calibration to %d %d %d %d %d %d", min_x, max_x, min_y, max_y, min_z, max_z);
 }
 //////////////////////////////////
@@ -683,8 +683,6 @@ class CalibrateCompassMode : public Task {
 
   virtual void begin() override {
     logf("calibrate compass mode");
-    compass.clearCalibration();
-    compass.read(); // reading forces the calibration to apply
     min_x = min_y = min_z = std::numeric_limits<int>::max();
     max_x = max_y = max_z = std::numeric_limits<int>::min();
   }
@@ -693,9 +691,9 @@ class CalibrateCompassMode : public Task {
   virtual void execute() override {
     update_motor_speeds();
 
-    int x = compass.getX();
-    int y = compass.getY();
-    int z = compass.getZ();
+    int x = compass.last_reading.x;
+    int y = compass.last_reading.y;
+    int z = compass.last_reading.z;
 
     logf("compass_xyz: %d %d %d", x, y, z);
     if (x < min_x) min_x = x;
@@ -1032,7 +1030,7 @@ void setup() {
   crsf_serial.begin(420000, SERIAL_8N1, pin_crsf_rx, pin_crsf_tx);
   gnss_serial.setRxBufferSize(4096);
 
-  gnss_serial.begin(115200, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
+  gnss_serial.begin(38400, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
 
   // In setup(), after gnss.begin():
   if (use_gnss) {
@@ -1053,8 +1051,8 @@ void setup() {
       gnss.setDynamicModel(DYN_MODEL_PEDESTRIAN);
 
       // Configure time base and update rate
-      gnss.setMeasurementRate(100);     // Measurements every 100ms
-      gnss.setNavigationFrequency(10);  // Navigation rate 10Hz
+      gnss.setMeasurementRate(1000);     // Measurements every 100ms
+      gnss.setNavigationFrequency(1);  // Navigation rate 10Hz
 
       // Save configuration
       bool success = gnss.saveConfiguration();
@@ -1067,12 +1065,11 @@ void setup() {
     }
   }
 
-  compass.init();
   if (!load_compass_calibration_from_spiffs()) {
-    compass.setCalibration(-950, 675, -1510, 47, 0, 850);
+    compass.set_calibration(-950, 675, -1510, 47, 0, 850);
   }
   // see https://www.magnetic-declination.com/
-  compass.setMagneticDeclination(11, 24);
+  // compass.setMagneticDeclination(11, 24);
 
 
   start_tof_distance_sensor(tof_left);
@@ -1436,7 +1433,7 @@ if (use_gnss && every_1000_ms) {
   if (every_100_ms) {
     BlockTimer bt(compass_stats);
     HangChecker hc("compass");
-    compass.read();
+    compass.update();
   }
 
   // blink for a few ms every second to show signs of life
@@ -1462,7 +1459,7 @@ if (use_gnss && every_1000_ms) {
     char display_string[16];
     fsm.current_task->get_display_string(display_string, 16);
     crsf.send_flight_mode(display_string);
-    crsf.send_attitude(0, 0, compass.getAzimuth());
+    crsf.send_attitude(0, 0, compass.get_azimuth_degrees());
 
     if (use_gnss) {
       crsf.send_gps(
