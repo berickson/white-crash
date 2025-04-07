@@ -50,7 +50,7 @@ class Severity {
 // Feature enable/disable
 const bool use_gnss = true; // sparkfun ublox
 const bool use_gps = false;  // tinygps
-const bool enable_stats_logging = false;
+const bool enable_stats_logging = true;
 const bool avoid_collisions = false;
 
 // calibration constants
@@ -405,6 +405,14 @@ void destroy_ros_node_and_publishers() {
 
 
 void setup_micro_ros_wifi() {
+  // Wait for WiFi connection
+  int wifi_retry = 0;
+  while (WiFi.status() != WL_CONNECTED && wifi_retry < 20) {
+      delay(500);
+      Serial.print(".");
+      wifi_retry++;
+  }
+
   delay(5000); // wait for serial monitor to connect
   Serial.printf("setting up micro ros\n");
   IPAddress agent_ip(192, 168, 86, 66);
@@ -419,8 +427,24 @@ void setup_micro_ros_wifi() {
   allocator = rcl_get_default_allocator();
   configTime(0, 0, "pool.ntp.org");
 
-  // set gnss time to ntp time utc
+
+
+  // Wait for NTP sync with timeout
+  const int NTP_TIMEOUT_MS = 5000;
+  const int NTP_CHECK_INTERVAL_MS = 100;
+  int waited_ms = 0;
+  bool time_valid = false;
+
   struct tm timeinfo;
+  while (!time_valid && waited_ms < NTP_TIMEOUT_MS) {
+      time_valid = getLocalTime(&timeinfo);
+      if (!time_valid) {
+          delay(NTP_CHECK_INTERVAL_MS);
+          waited_ms += NTP_CHECK_INTERVAL_MS;
+      }
+  }
+  
+  // set gnss time to ntp time utc
   struct timeval tv;
   if (gettimeofday(&tv, NULL) != 0) {
     Serial.println("Failed to obtain time");
@@ -541,7 +565,7 @@ bool go_toward_lat_lon(lat_lon destination, float * meters_to_next_waypoint) {
 
   // subtract courseTo from 360 to get postive ccw
   double desired_bearing_degrees = 360. - gps.courseTo(gnss_lat, gnss_lon, destination.lat, destination.lon);
-  double current_heading_degrees = compass.get_azimuth_degrees() + compass_mounting_angle_degrees; // chip is mounted 180 degrees off
+  double current_heading_degrees = compass.get_azimuth_degrees() + compass_mounting_angle_degrees;
 
   double heading_error = desired_bearing_degrees - current_heading_degrees;
   while (heading_error > 180) {
@@ -1049,6 +1073,8 @@ void setup() {
 
       // pedestrian more appropriate for slow speeds
       gnss.setDynamicModel(DYN_MODEL_PEDESTRIAN);
+      gnss.setUTCTimeAssistance(2025, 4, 6, 12, 0, 0, 0, 3600, 0, 3);
+
 
       // Configure time base and update rate
       gnss.setMeasurementRate(1000);     // Measurements every 100ms
@@ -1189,6 +1215,10 @@ void loop() {
     update_msg.right_motor_command = right_motor.get_setpoint();
     update_msg.rx_esc = crsf_ns::crsf_rc_channel_to_float(rx_esc);
     update_msg.rx_str = crsf_ns::crsf_rc_channel_to_float(rx_str);
+    update_msg.yaw_degrees = compass.get_azimuth_degrees();
+    update_msg.mag_x = compass.last_reading.x;
+    update_msg.mag_y = compass.last_reading.y;
+    update_msg.mag_z = compass.last_reading.z;
 
     if (ros_ready) {
       // publish update message
@@ -1289,7 +1319,7 @@ if (use_gnss && every_1000_ms) {
 
 
   if (use_gnss && every_1000_ms) {
-    gnss.getFixType();
+    gnss.getFixType(0);
 //    Serial.printf("gps fix type: %d\n", gnss.getFixType()); 
   }
 
@@ -1345,8 +1375,6 @@ if (use_gnss && every_1000_ms) {
     const float v_bat_scale = 0.0077578 * 7.9 / 30. * 7.96 / 3.06; // white-crash m    
     v_bat = v_bat_scale * sum  / sample_count;
     battery_msg.data = v_bat;
-
-    logf("battery voltage: %0.4f, pin_right_a: %d pin_right_b: %d\n", v_bat, digitalRead(pin_right_encoder_a), digitalRead(pin_right_encoder_b));
   }
 
   if (every_100_ms) {
