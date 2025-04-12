@@ -1,22 +1,18 @@
 Todo
-o Upgrade 3d chassis
-- Upgrade to dual core ESP-32 D mini (test first)
-- Bearing rear wheels w/ external adjustable axles
-- Bigger wheels
-- Aim tof sensors upward
-- Battry strap instead of battery tray
-- Battery Compartment:  You shouldn't have to remove the body to change the battery
-- Switch should go on chassis
-- Longer chassis? High-center inverted V?
+o get ready for maker fair
+- Test with phone network
+- Obstacle avoidance on a switch
+- Speed limit / battery limit
 
+o Bug: upload seems to depend on wheel position
+- fix with new board
 
+- Robust network connection - use state machine to reconnect
+- Battery mounts for LiPo and/or hold in the LiIon better so they don't fall out when you go upside down
 - micro-ros-agent errors, eprosima::fastcdr::exception::BadParamException, etc.
-- faster gps library
 - set waypoints from radio control
 - test with remote network and laptop (no home network)
 - Auto add intermediate waypoints if they are spaced too far apart
-- Electronic on switch
-- Battery mounts for LiPo and/or hold in the LiIon better so they don't fall out when you go upside down
 - Power switch on Chassis instead of lid
 - add a camera
 - Custom PCB
@@ -24,12 +20,29 @@ o Upgrade 3d chassis
 - Solder motor controller
 - Add mpu6050 and try to avoid toppling over when you hit an obstacle
 
+Next
+o L (large)
+- big enough to go over side-walk in front of house
+- high clearance
+- center track?
+- nice camera
+- mpu
+- pi
+- circuit board
+- more power
+- runs upside-down?
+
+o Tank train
+
 On Hold
+- Electronic on switch
+- Battery Compartment:  You shouldn't have to remove the body to change the battery
 - Camera (waiting for ESP32Cam results from Seth)
 - XShut to enable setting one at a time
 - Try 600rpm motors (currently 200rpm)
 - Drive wheel on top and passive on bottom to make more clearance
 - Estimate current by voltage and RPM, use this fur current limiting - see https://electronics.stackexchange.com/a/347027
+- faster gps library
 
 
 
@@ -49,3 +62,9 @@ Done
 - add a body
 - ROS on own thread, doesn't block main thread
 - "dead man switch" - moving range of throttle or steering stops auto
+o Upgrade 3d chassis
+- Upgrade to dual core ESP-32 D mini (test first)
+- Bearing rear wheels w/ external adjustable axles
+- Bigger wheels
+- Aim tof sensors upward
+- Switch should go on chassis
