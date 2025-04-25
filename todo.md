@@ -1,4 +1,9 @@
 Todo
+- create routes in the field
+- wifi on a switch
+- configuration web page. Could it be on the real web?
+- platformio libraries for custom device code, etc.
+
 o get ready for maker fair
 - Test with phone network
 - Obstacle avoidance on a switch
@@ -7,13 +12,9 @@ o get ready for maker fair
 o Bug: upload seems to depend on wheel position
 - fix with new board
 
-- Robust network connection - use state machine to reconnect
-- Battery mounts for LiPo and/or hold in the LiIon better so they don't fall out when you go upside down
-- micro-ros-agent errors, eprosima::fastcdr::exception::BadParamException, etc.
 - set waypoints from radio control
 - test with remote network and laptop (no home network)
 - Auto add intermediate waypoints if they are spaced too far apart
-- Power switch on Chassis instead of lid
 - add a camera
 - Custom PCB
 - 3d hardware mount points for all hardware
@@ -47,6 +48,10 @@ On Hold
 
 
 Done
+- Power switch on Chassis instead of lid
+- Robust network connection - use state machine to reconnect
+- Battery mounts for LiPo and/or hold in the LiIon better so they don't fall out when you go upside down
+- micro-ros-agent errors, eprosima::fastcdr::exception::BadParamException, etc.
 - enable running off-line, currently set_microros_wifi_transports blocks until connected
 -Try out pro GPS with new library (it works and gets about 27 satellites but less reliable position)
 - Turn car around so motors are in back and battery is in front
