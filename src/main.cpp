@@ -699,7 +699,12 @@ class HandMode : public Task {
 
 class CalibrateCompassMode : public Task {
  public:
-  int min_x, max_x, min_y, max_y, min_z, max_z;
+  int min_x = std::numeric_limits<int>::max();
+  int max_x = std::numeric_limits<int>::min();
+  int min_y = std::numeric_limits<int>::max();
+  int max_y = std::numeric_limits<int>::min();
+  int min_z = std::numeric_limits<int>::max();
+  int max_z = std::numeric_limits<int>::min();
 
   CalibrateCompassMode() {
     name = "cal-comp";
@@ -770,8 +775,8 @@ class AutoMode : public Task {
  public:
   bool unsticking = false;
   float meters_to_next_waypoint = 0;
-  float unstick_left_start_meters;
-  float unstick_right_start_meters;
+  float unstick_left_start_meters = NAN;
+  float unstick_right_start_meters = NAN;
 
   AutoMode() {
     name = "auto";
@@ -1203,6 +1208,7 @@ void loop() {
   bool every_100_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 100);
   bool every_200_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 200);
   bool every_1000_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 1000);
+  bool every_minute = every_n_ms(last_loop_time_ms, loop_time_ms, 60 * 1000);
 
   if (every_100_ms) {
     left_speedometer.update_from_sensor(micros(), left_encoder.odometer_a, left_encoder.last_odometer_a_us, left_encoder.odometer_b, left_encoder.last_odometer_b_us);
@@ -1301,7 +1307,7 @@ void loop() {
   }
 
 // In your logging code, add more debug info:
-if (use_gnss && every_1000_ms) {
+if (use_gnss && every_minute) {
   logf("gps date: (%d) %d-%d-%d %02d:%02d:%02d (%f,%f) fix: %d siv: %d",
     gnss.getTimeValid(0),
     gnss.getYear(0),
@@ -1354,7 +1360,7 @@ if (use_gnss && every_1000_ms) {
     //      right_encoder.odometer_a * meters_per_odometer_tick);
   }
   
-  if (enable_stats_logging && every_n_ms(last_loop_time_ms, loop_time_ms, 10000)) {
+  if (enable_stats_logging && every_minute) {
     for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, crsf_parse_stats, tof_distance_stats}) {
       stats.to_log_msg(&log_msg);
       log(log_msg);

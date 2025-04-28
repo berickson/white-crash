@@ -18,13 +18,11 @@ class Fsm : public Task {
   // current task should be an iterator into tasks
   Task * current_task = NULL;
 
-  bool done = false;
   void set_current_task(const char * name);
 
   Fsm(std::vector<Task*> tasks, std::vector<Edge> edges);
   void begin();
   void execute();
-  bool is_done();
   void end();
   void set_event(const char * event);
 };

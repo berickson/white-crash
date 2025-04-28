@@ -143,7 +143,7 @@ struct CrsfGPS {
 
 class Crsf {
  private:
-  crsf_ns::RcCallback rc_callback;
+  crsf_ns::RcCallback rc_callback = nullptr;
 
   // for input state machine
   uint8_t length_byte = 0;
@@ -172,7 +172,7 @@ class Crsf {
     awaiting_frame_type,
     awaiting_payload,
     awaiting_crc
-  } packet_state;
+  } packet_state = awaiting_start;
 
   void process_payload() {
     using namespace internal_to_crsf;

@@ -69,10 +69,6 @@ void Fsm::end() {
   done = true;
 }
 
-bool Fsm::is_done() {
-  return done;;
-}
-
 void Fsm::set_event(const char * event) {
   // move based on event
   for (auto edge : edges) {
