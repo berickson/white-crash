@@ -424,7 +424,6 @@ void setup_micro_ros_wifi() {
   int wifi_retry = 0;
   while (WiFi.status() != WL_CONNECTED && wifi_retry < 20) {
       delay(500);
-      Serial.print(".");
       wifi_retry++;
   }
 
