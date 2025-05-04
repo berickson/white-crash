@@ -1205,8 +1205,6 @@ void setup() {
 
   left_motor.init(pin_left_fwd, pin_left_rev);
   right_motor.init(pin_right_fwd, pin_right_rev);
-  // pinMode(pin_test, OUTPUT);
-  digitalWrite(pin_battery_voltage, LOW);
   pinMode(pin_built_in_led, OUTPUT);
   pinMode(pin_battery_voltage, INPUT);
 
