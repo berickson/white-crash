@@ -231,9 +231,23 @@ int rx_str = 0;
 int rx_esc = 0;
 int rx_aux = 0;
 bool button_sc_pressed = false;
+bool toggle_a_enabled = false;
+bool toggle_b_enabled = false;
+float p1_knob_percent = NAN;
+float p2_knob_percent = NAN;
 double v_bat = NAN;
 
 bool ros_ready = false;
+
+// virtual vbat floor and ceiling give the maximum range to set the voltage
+// from the remote controller
+const float virtual_vbat_ceiling = 12.6;
+const float virtual_vbat_floor = 2.0;
+
+// virtual_vbat makes the car act like
+// it has a battery with a lower voltage
+// set by the controller
+float virtual_vbat = virtual_vbat_ceiling;
 
 
 RunStatistics gps_stats("gps");
@@ -389,7 +403,6 @@ void create_ros_node_and_publishers() {
   }
 }
 
-
 void destroy_ros_node_and_publishers() { 
   RCCHECK(rcl_publisher_fini(&log_publisher, &node));
   RCCHECK(rcl_publisher_fini(&battery_publisher, &node));
@@ -516,6 +529,9 @@ void right_b_changed() {
 }
 
 void handle_rc_message(crsf_ns::RcData &rc_data) {
+  static int message_count = 0;
+  ++message_count;
+
   if (rc_data.failsafe) {
     rx_str = 0;
     rx_esc = 0;
@@ -526,6 +542,47 @@ void handle_rc_message(crsf_ns::RcData &rc_data) {
     rx_esc = rc_data.channels[1];
     rx_aux = rc_data.channels[2];
     button_sc_pressed = crsf_ns::crsf_rc_channel_to_bool(rc_data.channels[6]);
+    toggle_a_enabled = crsf_ns::crsf_rc_channel_to_bool(rc_data.channels[8]);
+    toggle_b_enabled = crsf_ns::crsf_rc_channel_to_bool(rc_data.channels[9]);
+    p1_knob_percent = crsf_ns::crsf_rc_channel_to_ratio(rc_data.channels[4]);
+    p2_knob_percent = crsf_ns::crsf_rc_channel_to_ratio(rc_data.channels[5]);
+  }
+
+  virtual_vbat = virtual_vbat_floor + (virtual_vbat_ceiling - virtual_vbat_floor) * p1_knob_percent;
+
+
+  // log the inputs
+  if (message_count % 100 == 0) {
+    logf("rc str: %d esc: %d aux: %d sc: %d a: %d b: %d p1: %0.4f p2: %0.4f",
+        rx_str,
+        rx_esc,
+        rx_aux,
+        button_sc_pressed,
+        toggle_a_enabled,
+        toggle_b_enabled,
+        p1_knob_percent,
+        p2_knob_percent);
+  }
+  if (message_count % 100 == 0) {
+    // log all rc channels 0..15
+    logf("rc channels: 0:%d 1:%d 2:%d 3:%d 4:%d 5:%d 6:%d 7:%d 8:%d 9:%d 10:%d 11:%d 12:%d 13:%d 14:%d 15:%d",
+        rc_data.channels[0],
+        rc_data.channels[1],
+        rc_data.channels[2],
+        rc_data.channels[3],
+         rc_data.channels[4],
+         rc_data.channels[5],
+         rc_data.channels[6],
+         rc_data.channels[7],
+         rc_data.channels[8],
+         rc_data.channels[9],
+         rc_data.channels[10],
+         rc_data.channels[11],
+         rc_data.channels[12],
+         rc_data.channels[13],
+         rc_data.channels[14],
+         rc_data.channels[15]);
+
   }
 }
 
@@ -536,6 +593,27 @@ unsigned long loop_time_ms = 0;
 bool every_n_ms(unsigned long last_loop_ms, unsigned long loop_ms, unsigned long ms) {
   return (last_loop_ms % ms) + (loop_ms - last_loop_ms) >= ms;
 }
+
+float scale_motor_command_to_virtual_battery(float command) {
+  // motor.go commands range from -1.0 to 1.0
+  // we want the motor to act like it is running on a battery with voltage
+  // of virtual_vbat. Note, this should only decrease the command, not increase it.
+
+  if (virtual_vbat >= v_bat) {
+    return command;
+  }
+
+  // scale the command to the virtual battery
+  command *= virtual_vbat / v_bat;
+  if (command > 1.0) {
+    command = 1.0;
+  }
+  if (command < -1.0) {
+    command = -1.0;
+  }
+  return command;
+
+} 
 
 // sets motor speeds to go to a lat/lon
 // returns true if arrived
@@ -597,8 +675,8 @@ bool go_toward_lat_lon(lat_lon destination, float * meters_to_next_waypoint) {
   }
 
   // printf("left_motor_speed: %0.4f right_motor_speed: %0.4f\n", left_motor_speed, right_motor_speed);
-  left_motor.go(left_motor_speed);
-  right_motor.go(right_motor_speed);
+  left_motor.go(scale_motor_command_to_virtual_battery(left_motor_speed));
+  right_motor.go(scale_motor_command_to_virtual_battery(right_motor_speed));
 
   if (every_n_ms(last_loop_time_ms, loop_time_ms, 100)) {
     logf("speed: %f, %f destination: %f %f direction: %s, distance_remaining: %0.4f, desired_bearing_degrees: %0.4f current_heading_degrees: %0.4f heading_error: %0.4f",
@@ -669,8 +747,8 @@ void update_motor_speeds() {
   float right_speed = speed + str_speed;
   float left_speed = speed - str_speed;
 
-  right_motor.go(right_speed, false);
-  left_motor.go(left_speed, false);
+  right_motor.go(scale_motor_command_to_virtual_battery(right_speed), false);
+  left_motor.go(scale_motor_command_to_virtual_battery(left_speed), false);
 }
 
 void update_compass_calibration(int min_x, int max_x, int min_y, int max_y, int min_z, int max_z) {
@@ -993,6 +1071,8 @@ void flash_forever() {
     delay(250);
   }
 }
+
+
 
 //////////////////////////////////
 // Main setup and loop

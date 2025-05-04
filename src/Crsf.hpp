@@ -12,15 +12,27 @@ struct RcData {
 typedef void (*RcCallback)(RcData &);
 
 const uint16_t crsf_rc_channel_min = 172;
-const uint16_t crsf_rc_channel_max = 1811;
+const uint16_t crsf_rc_channel_max = 1810;
 const uint16_t crsf_rc_channel_center = 992;
 const uint16_t crsf_rc_channel_range = crsf_rc_channel_max - crsf_rc_channel_min;
 
-// returns float [0, 1] from crsf rc channel value
+// returns float [-1, 1] from crsf rc channel value
 float crsf_rc_channel_to_float(uint16_t value) {
   using namespace crsf_ns;
 
   return (value - crsf_rc_channel_center) * 2.0 / crsf_rc_channel_range;
+}
+
+// returns float [0, 1] from crsf rc channel value
+float crsf_rc_channel_to_ratio(uint16_t value) {
+  using namespace crsf_ns;
+  float v = (value - crsf_rc_channel_min) / (float)crsf_rc_channel_range;
+  if (v < 0.0) {
+    v = 0.0;
+  } else if (v > 1.0) {
+    v = 1.0;
+  }
+  return v;
 }
 
 // returns a bool for a pushbutton / toggle switch, true if above center
