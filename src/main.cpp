@@ -51,7 +51,6 @@ class Severity {
 const bool use_gnss = true; // sparkfun ublox
 const bool use_gps = false;  // tinygps
 const bool enable_stats_logging = true;
-const bool avoid_collisions = false;
 
 // calibration constants
 //float meters_per_odometer_tick = 0.00008204; // S
@@ -248,6 +247,9 @@ const float virtual_vbat_floor = 2.0;
 // it has a battery with a lower voltage
 // set by the controller
 float virtual_vbat = virtual_vbat_ceiling;
+
+bool avoid_collisions = false;
+
 
 
 RunStatistics gps_stats("gps");
@@ -548,11 +550,13 @@ void handle_rc_message(crsf_ns::RcData &rc_data) {
     p2_knob_percent = crsf_ns::crsf_rc_channel_to_ratio(rc_data.channels[5]);
   }
 
+  // set parameters based on rc input
   virtual_vbat = virtual_vbat_floor + (virtual_vbat_ceiling - virtual_vbat_floor) * p1_knob_percent;
+  avoid_collisions = toggle_a_enabled;
 
 
   // log the inputs
-  if (message_count % 100 == 0) {
+  if (false && message_count % 100 == 0) {
     logf("rc str: %d esc: %d aux: %d sc: %d a: %d b: %d p1: %0.4f p2: %0.4f",
         rx_str,
         rx_esc,
@@ -563,7 +567,7 @@ void handle_rc_message(crsf_ns::RcData &rc_data) {
         p1_knob_percent,
         p2_knob_percent);
   }
-  if (message_count % 100 == 0) {
+  if (false && message_count % 100 == 0) {
     // log all rc channels 0..15
     logf("rc channels: 0:%d 1:%d 2:%d 3:%d 4:%d 5:%d 6:%d 7:%d 8:%d 9:%d 10:%d 11:%d 12:%d 13:%d 14:%d 15:%d",
         rc_data.channels[0],
