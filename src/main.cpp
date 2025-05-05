@@ -238,6 +238,16 @@ double v_bat = NAN;
 
 bool ros_ready = false;
 
+char temporary_display_string[16] = {0};
+unsigned long temporary_display_string_set_ms = 0;
+const unsigned long temporary_display_string_timeout_ms = 1000;
+
+void set_temporary_display_string(const char * str) {
+  strncpy(temporary_display_string, str, sizeof(temporary_display_string));
+  temporary_display_string_set_ms = millis();
+}
+
+
 // virtual vbat floor and ceiling give the maximum range to set the voltage
 // from the remote controller
 const float virtual_vbat_ceiling = 12.6;
@@ -530,7 +540,10 @@ void right_b_changed() {
 }
 
 void handle_rc_message(crsf_ns::RcData &rc_data) {
+  static bool first_time = true;
   static int message_count = 0;
+  static float last_virtual_bat = NAN;
+  static bool last_avoid_collisions = false;
   ++message_count;
 
   if (rc_data.failsafe) {
@@ -552,6 +565,27 @@ void handle_rc_message(crsf_ns::RcData &rc_data) {
   // set parameters based on rc input
   virtual_vbat = virtual_vbat_floor + (virtual_vbat_ceiling - virtual_vbat_floor) * p1_knob_percent;
   avoid_collisions = toggle_a_enabled;
+
+  if (first_time) {
+    last_virtual_bat = virtual_vbat;
+    last_avoid_collisions = avoid_collisions;
+    first_time = false;
+  }
+
+  if (fabs(last_virtual_bat - virtual_vbat)>0.03) {
+    char str[20];
+    snprintf(str, sizeof(str), "v_max: %0.1f", virtual_vbat);
+    set_temporary_display_string(str);
+    last_virtual_bat = virtual_vbat;
+  }
+  if (avoid_collisions != last_avoid_collisions) {
+    if (avoid_collisions) {
+      set_temporary_display_string("avoid");
+    } else {
+      set_temporary_display_string("no avoid");
+    }
+    last_avoid_collisions = avoid_collisions;
+  }
 
 
   // log the inputs
@@ -1572,7 +1606,15 @@ if (use_gnss && every_minute) {
 
     crsf.send_battery(v_bat, 0, 0, percent);
     char display_string[16];
-    fsm.current_task->get_display_string(display_string, 16);
+
+    // if we have a temporary display string, and the timeout is not up, use it
+    if (temporary_display_string_timeout_ms > 0 && millis() - temporary_display_string_set_ms < temporary_display_string_timeout_ms) {
+      snprintf(display_string, sizeof(display_string), "%s", temporary_display_string);
+    } else {
+      fsm.current_task->get_display_string(display_string, 16);
+    }
+
+
     crsf.send_flight_mode(display_string);
     crsf.send_attitude(0, 0, compass.get_azimuth_degrees());
 
