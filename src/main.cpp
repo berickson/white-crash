@@ -430,23 +430,54 @@ void destroy_ros_node_and_publishers() {
 
 
 void setup_micro_ros_wifi() {
-  // Wait for WiFi connection
-  int wifi_retry = 0;
-  while (WiFi.status() != WL_CONNECTED && wifi_retry < 20) {
-      delay(500);
-      wifi_retry++;
+  // go through wifi_logins and find the first available wifi
+  // network that matches the ssid, but don't connect to it yet
+
+  ConnectionInfo * connection_info = NULL;
+  while (connection_info == NULL) {
+    int network_count = WiFi.scanNetworks();
+    for (auto &wifi_login : wifi_logins) {
+      for (int i = 0; i < network_count; i++) {
+        String ssid = WiFi.SSID(i);
+        if (ssid == wifi_login.ssid) {
+          connection_info = &wifi_login;
+          break;
+        }
+      }
+      if (connection_info != NULL) {
+        break;
+      }
+    }
+    if (connection_info == NULL) {
+      Serial.printf("No wifi networks found, retrying in 5 seconds\n");
+      delay(5000);
+    }
   }
 
   delay(5000); // wait for serial monitor to connect
   Serial.printf("setting up micro ros\n");
-  IPAddress agent_ip(192, 168, 86, 66);
-  size_t agent_port = 8888;
 
-  char *ssid = const_cast<char *>(wifi_ssid);
-  char *psk = const_cast<char *>(wifi_password);
+	WiFi.begin(connection_info->ssid, connection_info->password);
 
-  
-  set_microros_wifi_transports(ssid, psk, agent_ip, agent_port);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+  }
+
+  IPAddress agent_ip;
+  WiFi.hostByName(connection_info->micro_ros_hostname, agent_ip);
+ 
+  static struct micro_ros_agent_locator locator;
+  locator.address = agent_ip;
+  locator.port = connection_info->micro_ros_port;
+
+  rmw_uros_set_custom_transport(
+      false,
+      (void *) &locator,
+      platformio_transport_open,
+      platformio_transport_close,
+      platformio_transport_write,
+      platformio_transport_read
+  );
 
   allocator = rcl_get_default_allocator();
   configTime(0, 0, "pool.ntp.org");
