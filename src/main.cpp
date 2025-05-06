@@ -454,6 +454,8 @@ void setup_micro_ros_wifi() {
     }
   }
 
+  Serial.printf("Found wifi network %s, connecting to %s\n", connection_info->ssid, connection_info->ssid);
+
   delay(5000); // wait for serial monitor to connect
   Serial.printf("setting up micro ros\n");
 
@@ -465,6 +467,7 @@ void setup_micro_ros_wifi() {
 
   IPAddress agent_ip;
   WiFi.hostByName(connection_info->micro_ros_hostname, agent_ip);
+  Serial.printf("Connected to wifi, agent ip: %s %s\n",connection_info->micro_ros_hostname, agent_ip.toString().c_str());
  
   static struct micro_ros_agent_locator locator;
   locator.address = agent_ip;
