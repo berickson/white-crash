@@ -1215,26 +1215,28 @@ void setup() {
   // In setup(), after gnss.begin():
   if (use_gnss) {
     if (gnss.begin(gnss_serial, 2000, true)) {
+        
       // Configure message output
-      gnss.setUART1Output(COM_TYPE_NMEA);
-      gnss.enableNMEAMessage(UBX_NMEA_RMC, COM_PORT_UART1);  // Time and date
-      gnss.enableNMEAMessage(UBX_NMEA_GGA, COM_PORT_UART1);  // Fix data
-      gnss.enableNMEAMessage(UBX_NMEA_ZDA, COM_PORT_UART1);  // Precise time/date
+      gnss.setUART1Output(COM_TYPE_NMEA | COM_TYPE_UBX);
+      // gnss.enableNMEAMessage(UBX_NMEA_RMC, COM_PORT_UART1);  // Time and date
+      // gnss.enableNMEAMessage(UBX_NMEA_GGA, COM_PORT_UART1);  // Fix data
+      // gnss.enableNMEAMessage(UBX_NMEA_ZDA, COM_PORT_UART1);  // Precise time/date
 
       // Enable multiple GNSS constellations
       gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GPS);     // GPS USA
       gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GALILEO); // Galileo Europe
       gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_BEIDOU);  // BeiDou China
       gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GLONASS); // GLONASS Russia
+      gnss.setAutoPVT(true); // Automatically send Position, Velocity, Time messages
+      gnss.setAopCfg(true); // Enable AOP (Assisted Orbit Prediction) for faster startup
 
-      // pedestrian more appropriate for slow speeds
-      gnss.setDynamicModel(DYN_MODEL_PEDESTRIAN);
+      gnss.setDynamicModel(DYN_MODEL_PORTABLE);
       gnss.setUTCTimeAssistance(2025, 4, 6, 12, 0, 0, 0, 3600, 0, 3);
 
 
       // Configure time base and update rate
-      gnss.setMeasurementRate(1000);     // Measurements every 100ms
-      gnss.setNavigationFrequency(1);  // Navigation rate 10Hz
+      gnss.setMeasurementRate(100);     // Measurements every 100ms
+      gnss.setNavigationFrequency(10);  // Navigation rate 10Hz
 
       // Save configuration
       bool success = gnss.saveConfiguration();
@@ -1456,7 +1458,7 @@ void loop() {
   }
 
 // In your logging code, add more debug info:
-if (use_gnss && every_minute) {
+if (use_gnss && every_1000_ms) {
   logf("gps date: (%d) %d-%d-%d %02d:%02d:%02d (%f,%f) fix: %d siv: %d",
     gnss.getTimeValid(0),
     gnss.getYear(0),
