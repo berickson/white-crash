@@ -1190,6 +1190,47 @@ void flash_forever() {
 }
 #endif
 
+void gnss_init_thread(void *parameter) {
+  Serial.printf("[%lu ms] GNSS init thread started\n", millis());
+  
+  Serial.printf("[%lu ms] Initializing GNSS module\n", millis());
+  if (gnss.begin(gnss_serial, 2000, true)) {
+    Serial.printf("[%lu ms] GNSS module detected\n", millis());
+    
+    // Configure message output
+    Serial.printf("[%lu ms] Setting UART1 output\n", millis());
+    gnss.setUART1Output(COM_TYPE_NMEA);
+    Serial.printf("[%lu ms] Enabling NMEA messages\n", millis());
+    gnss.enableNMEAMessage(UBX_NMEA_RMC, COM_PORT_UART1);  // Time and date
+    gnss.enableNMEAMessage(UBX_NMEA_GGA, COM_PORT_UART1);  // Fix data
+    gnss.enableNMEAMessage(UBX_NMEA_ZDA, COM_PORT_UART1);  // Precise time/date
+    Serial.printf("[%lu ms] NMEA messages enabled\n", millis());
+
+    // Enable multiple GNSS constellations
+    Serial.printf("[%lu ms] Enabling GNSS constellations\n", millis());
+    gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GPS);     // GPS USA
+    gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GALILEO); // Galileo Europe
+    gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_BEIDOU);  // BeiDou China
+    gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GLONASS); // GLONASS Russia
+    Serial.printf("[%lu ms] GNSS constellations enabled\n", millis());
+
+    // Configure time base and update rate
+    Serial.printf("[%lu ms] Configuring GNSS measurement rate\n", millis());
+    gnss.setMeasurementRate(100);     // Measurements every 100ms
+    gnss.setNavigationFrequency(10);  // Navigation rate 10Hz
+
+    // Save configuration
+    Serial.printf("[%lu ms] Saving GNSS configuration\n", millis());
+    bool success = gnss.saveConfiguration();
+    Serial.printf("[%lu ms] GPS configuration %s\n", millis(), success ? "saved" : "failed to save");
+  }
+  else {
+    Serial.printf("[%lu ms] GPS failed to initialize\n", millis());
+  }
+  
+  Serial.printf("[%lu ms] GNSS init thread completed\n", millis());
+  vTaskDelete(NULL);
+}
 
 
 //////////////////////////////////
@@ -1205,6 +1246,8 @@ void setup() {
   Serial.begin(115200);
 
   // note: it takes about 1.8 sconds after boot for serial messages to show in platformio
+  // delay(2000);  // Wait for serial to be ready
+  Serial.printf("[%lu ms] Setup starting\n", millis());
 
   // int i = 0;
   // do {
@@ -1214,7 +1257,9 @@ void setup() {
   //   ++i;
   // } while(true);
 
+  Serial.printf("[%lu ms] Starting SPIFFS\n", millis());
   SPIFFS.begin();
+  Serial.printf("[%lu ms] SPIFFS initialized\n", millis());
 
 
   // preallocate log message for all logging
@@ -1241,7 +1286,7 @@ void setup() {
   rosout_msg.function.size = 0;
   rosout_msg.line = 0;
 
-
+  Serial.printf("[%lu ms] Log messages allocated\n", millis());
   tof_distance_msg.header.frame_id.data = (char *)malloc(20);
   tof_distance_msg.header.frame_id.capacity = 20;
   strncpy(tof_distance_msg.header.frame_id.data, "tof_frame", 20);
@@ -1257,10 +1302,11 @@ void setup() {
   tof_distance_msg.radiation_type = sensor_msgs__msg__Range__INFRARED;
   tof_distance_msg.field_of_view = 27 * M_PI / 180; // 27 degrees
 
+  Serial.printf("[%lu ms] Initializing I2C\n", millis());
   Wire.setPins(pin_sda, pin_scl);
   Wire.begin();
   Wire.setTimeOut(5); // ms
-
+  Serial.printf("[%lu ms] I2C initialized\n", millis());
 
   //Wire1.setPins(pin_tof_sda, pin_tof_scl);
   //Wire1.begin();
@@ -1272,88 +1318,72 @@ void setup() {
   fsm.begin();
 
   Serial.write("white_crash\n");
-  crsf_serial.setRxBufferSize(4096);
-  crsf_serial.begin(420000, SERIAL_8N1, pin_crsf_rx, pin_crsf_tx);
   gnss_serial.setRxBufferSize(4096);
 
+  Serial.printf("[%lu ms] Starting GNSS serial\n", millis());
   gnss_serial.begin(38400, SERIAL_8N1, pin_gps_rx, pin_gps_tx);
+  Serial.printf("[%lu ms] GNSS serial started\n", millis());
 
-  // In setup(), after gnss.begin():
+  // Start GNSS initialization in a separate thread so it doesn't block setup
   if (use_gnss) {
-    
-    if (gnss.begin(gnss_serial, 2000, true)) {
-
-      // gnss.factoryReset();
-      // while (true) {
-      //   Serial.println("reset gnss");
-      //   delay(1000);
-      // }
-
-        
-      // // Configure message output
-      // gnss.setUART1Output(COM_TYPE_NMEA | COM_TYPE_UBX);
-      gnss.setUART1Output(COM_TYPE_NMEA);
-      gnss.enableNMEAMessage(UBX_NMEA_RMC, COM_PORT_UART1);  // Time and date
-      gnss.enableNMEAMessage(UBX_NMEA_GGA, COM_PORT_UART1);  // Fix data
-      gnss.enableNMEAMessage(UBX_NMEA_ZDA, COM_PORT_UART1);  // Precise time/date
-
-      // Enable multiple GNSS constellations
-      gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GPS);     // GPS USA
-      gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GALILEO); // Galileo Europe
-      gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_BEIDOU);  // BeiDou China
-      gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GLONASS); // GLONASS Russia
-
-      // gnss.setAutoPVT(true); // Automatically send Position, Velocity, Time messages
-      
-      // gnss.setAopCfg(true); // Enable AOP (Assisted Orbit Prediction) for faster startup
-
-      // gnss.setDynamicModel(DYN_MODEL_PORTABLE);
-      // gnss.setUTCTimeAssistance(2025, 4, 6, 12, 0, 0, 0, 3600, 0, 3);
-
-
-      // // Configure time base and update rate
-      gnss.setMeasurementRate(100);     // Measurements every 100ms
-      gnss.setNavigationFrequency(10);  // Navigation rate 10Hz
-
-      // // Save configuration
-      bool success = gnss.saveConfiguration();
-      Serial.printf("GPS configuration %s\n", success ? "saved" : "failed to save");
-
-      // Serial.println("GPS configured");
-    }
-    else {
-      Serial.println("GPS failed to initialize");
-    }
+    Serial.printf("[%lu ms] Starting GNSS init thread\n", millis());
+    xTaskCreatePinnedToCore(
+        gnss_init_thread,
+        "gnss_init",
+        8192,
+        NULL,
+        1,
+        NULL,
+        1);
   }
 
+  Serial.printf("[%lu ms] Loading compass calibration\n", millis());
   if (!load_compass_calibration_from_spiffs()) {
     compass.set_calibration(-950, 675, -1510, 47, 0, 850);
   }
+  Serial.printf("[%lu ms] Compass calibration loaded\n", millis());
   // see https://www.magnetic-declination.com/
   // compass.setMagneticDeclination(11, 24);
 
-
+  Serial.printf("[%lu ms] Starting TOF sensors\n", millis());
   start_tof_distance_sensor(tof_left);
   start_tof_distance_sensor(tof_right);
   start_tof_distance_sensor(tof_center);
+  Serial.printf("[%lu ms] TOF sensors started\n", millis());
 
   // quadrature encoders
+  Serial.printf("[%lu ms] Setting up encoders\n", millis());
 
   attachInterrupt(digitalPinToInterrupt(pin_left_encoder_a), left_a_changed, CHANGE);
   attachInterrupt(digitalPinToInterrupt(pin_left_encoder_b), left_b_changed, CHANGE);
   attachInterrupt(digitalPinToInterrupt(pin_right_encoder_a), right_a_changed, CHANGE);
   attachInterrupt(digitalPinToInterrupt(pin_right_encoder_b), right_b_changed, CHANGE);
+  Serial.printf("[%lu ms] Encoders setup complete\n", millis());
+
+  Serial.printf("[%lu ms] Starting CRSF serial\n", millis());
+  crsf_serial.setRxBufferSize(500);
+  crsf_serial.begin(420000, SERIAL_8N1, pin_crsf_rx, pin_crsf_tx);
+  Serial.printf("[%lu ms] CRSF serial started\n", millis());
 
   // crsf
+  Serial.printf("[%lu ms] Starting CRSF\n", millis());
+  // Clear any data that accumulated in the buffer before CRSF initialization
+  while(crsf_serial.available()) {
+    crsf_serial.read();
+  }
+  Serial.printf("[%lu ms] CRSF serial buffer cleared\n", millis());
   crsf.begin();
   crsf.update();
 
   crsf.set_rc_callback(handle_rc_message);
+  Serial.printf("[%lu ms] CRSF initialized\n", millis());
 
+  Serial.printf("[%lu ms] Initializing motors\n", millis());
   left_motor.init(pin_left_fwd, pin_left_rev);
   right_motor.init(pin_right_fwd, pin_right_rev);
   right_motor.go(0);
   left_motor.go(0);
+  Serial.printf("[%lu ms] Motors initialized\n", millis());
 #ifdef pin_built_in_led
   pinMode(pin_built_in_led, OUTPUT);
   pinMode(pin_battery_voltage, INPUT);
@@ -1363,8 +1393,10 @@ void setup() {
   // (1V input = ADC reading of 1575).
   analogSetPinAttenuation(pin_battery_voltage, ADC_11db); 
   adcAttachPin(pin_battery_voltage);
+  Serial.printf("[%lu ms] ADC configured\n", millis());
 
   // create a thread for ros stuff
+  Serial.printf("[%lu ms] Creating ROS thread\n", millis());
   if(true) {
     xTaskCreatePinnedToCore(
         ros_thread,
@@ -1375,13 +1407,17 @@ void setup() {
         NULL,
         1);
   }
+  Serial.printf("[%lu ms] ROS thread created\n", millis());
   // reset all serial data
+  Serial.printf("[%lu ms] Flushing serial buffers\n", millis());
   uart_flush_input(0);
   uart_flush_input(1);
+  Serial.printf("[%lu ms] Serial buffers flushed\n", millis());
 
 #ifdef pin_built_in_led
   digitalWrite(pin_built_in_led, 0);
 #endif
+  Serial.printf("[%lu ms] Setup complete!\n", millis());
 }
 
 
