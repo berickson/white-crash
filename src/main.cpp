@@ -169,8 +169,8 @@ const int pin_right_tof_power = pin_gpio_5;
 // LOLIN pins
 // S3 Mini pin mapping - ACTUAL WIRING
 // I2C - using default S3 I2C pins
-const int pin_sda = 8;   // I2C SDA (default for S3, was GPIO 4 on old board)
-const int pin_scl = 9;   // I2C SCL (default for S3, was GPIO 16 on old board)
+const int pin_sda = 34;   // I2C SDA (default for S3, was GPIO 4 on old board)
+const int pin_scl = 35;   // I2C SCL (default for S3, was GPIO 16 on old board)
 
 // CRSF (radio control)
 const int pin_crsf_rx = 38;  // CRSF RX (was GPIO 17)
@@ -190,10 +190,10 @@ const int pin_left_encoder_a = 4;    // Left encoder A (was GPIO 33)
 const int pin_left_encoder_b = 12;   // Left encoder B (was GPIO 34)
 
 // Motor control
-const int pin_left_fwd = 44;  // Left motor forward (was GPIO 32)
+const int pin_left_fwd = 33;  // Left motor forward (was GPIO 32)
 const int pin_left_rev = 37;  // Left motor reverse (was GPIO 21)
-const int pin_right_fwd = 5;  // Right motor forward (was GPIO 18)
-const int pin_right_rev = 3;  // Right motor reverse (was GPIO 26)
+const int pin_right_fwd = 17;  // Right motor forward (was GPIO 18)
+const int pin_right_rev = 16;  // Right motor reverse (was GPIO 26)
 
 // ToF power control
 const int pin_left_tof_power = 6;    // Left ToF power (was GPIO 19)
@@ -1196,11 +1196,23 @@ void flash_forever() {
 // Main setup and loop
 
 void setup() {
+
+
 #ifdef pin_built_in_led
   pinMode(pin_built_in_led, OUTPUT);
   digitalWrite(pin_built_in_led, HIGH);
 #endif
   Serial.begin(115200);
+
+  // note: it takes about 1.8 sconds after boot for serial messages to show in platformio
+
+  // int i = 0;
+  // do {
+  //   Serial.printf("white-crash has been running for %.1f seconds\n", i / 10.0);
+  //   Serial.flush();
+  //   delay(100);
+  //   ++i;
+  // } while(true);
 
   SPIFFS.begin();
 
@@ -1340,6 +1352,8 @@ void setup() {
 
   left_motor.init(pin_left_fwd, pin_left_rev);
   right_motor.init(pin_right_fwd, pin_right_rev);
+  right_motor.go(0);
+  left_motor.go(0);
 #ifdef pin_built_in_led
   pinMode(pin_built_in_led, OUTPUT);
   pinMode(pin_battery_voltage, INPUT);
@@ -1427,6 +1441,10 @@ void loop() {
   bool every_200_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 200);
   bool every_1000_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 1000);
   bool every_minute = every_n_ms(last_loop_time_ms, loop_time_ms, 60 * 1000);
+
+  if (every_1000_ms) {
+    Serial.println("in loop");
+  }
 
   if (every_100_ms) {
     left_speedometer.update_from_sensor(micros(), left_encoder.odometer_a, left_encoder.last_odometer_a_us, left_encoder.odometer_b, left_encoder.last_odometer_b_us);
