@@ -1243,7 +1243,7 @@ void setup() {
   pinMode(pin_built_in_led, OUTPUT);
   digitalWrite(pin_built_in_led, HIGH);
 #endif
-  Serial.begin(115200);
+  Serial.begin(3000000);
 
   // note: it takes about 1.8 sconds after boot for serial messages to show in platformio
   // delay(2000);  // Wait for serial to be ready
@@ -1408,11 +1408,6 @@ void setup() {
         1);
   }
   Serial.printf("[%lu ms] ROS thread created\n", millis());
-  // reset all serial data
-  Serial.printf("[%lu ms] Flushing serial buffers\n", millis());
-  uart_flush_input(0);
-  uart_flush_input(1);
-  Serial.printf("[%lu ms] Serial buffers flushed\n", millis());
 
 #ifdef pin_built_in_led
   digitalWrite(pin_built_in_led, 0);
