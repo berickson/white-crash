@@ -1473,10 +1473,6 @@ void loop() {
   bool every_1000_ms = every_n_ms(last_loop_time_ms, loop_time_ms, 1000);
   bool every_minute = every_n_ms(last_loop_time_ms, loop_time_ms, 60 * 1000);
 
-  if (every_1000_ms) {
-    Serial.println("in loop");
-  }
-
   if (every_100_ms) {
     left_speedometer.update_from_sensor(micros(), left_encoder.odometer_a, left_encoder.last_odometer_a_us, left_encoder.odometer_b, left_encoder.last_odometer_b_us);
     right_speedometer.update_from_sensor(micros(), right_encoder.odometer_a, right_encoder.last_odometer_a_us, right_encoder.odometer_b, right_encoder.last_odometer_b_us);
@@ -1616,7 +1612,7 @@ if (use_gnss && every_100_ms) {
 };  
 
 // In your logging code, add more debug info:
-if (use_gnss && every_1000_ms) {
+if (use_gnss && every_minute) {
   logf("gps date: (%d) %d-%d-%d %02d:%02d:%02d (%f,%f) fix: %d siv: %d",
     gnss.getTimeValid(0),
     gnss.getYear(0),
