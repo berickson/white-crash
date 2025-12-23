@@ -24,6 +24,7 @@
 #include <std_msgs/msg/float32.h>
 #include <std_msgs/msg/int32.h>
 #include <std_msgs/msg/string.h>
+#include <sensor_msgs/msg/nav_sat_fix.h>
 #include <sensor_msgs/msg/range.h>
 
 #include <white_crash_msgs/msg/update.h>
@@ -93,6 +94,7 @@ const char *compass_calibration_file_path = "/compass_calibration.txt";
 
 // pins broken out on the board
 
+/*
 const int pin_built_in_led = 2; // ok
 const int pin_clk_dont_use = 6;
 const int pin_cmd_dont_use = 11;
@@ -162,7 +164,41 @@ const int pin_left_tof_power = pin_gpio_19;
 const int pin_center_tof_power = pin_gpio_23;
 const int pin_right_tof_power = pin_gpio_5;
 
+*/
 
+// LOLIN pins
+// S3 Mini pin mapping - ACTUAL WIRING
+// I2C - using default S3 I2C pins
+const int pin_sda = 8;   // I2C SDA (default for S3, was GPIO 4 on old board)
+const int pin_scl = 9;   // I2C SCL (default for S3, was GPIO 16 on old board)
+
+// CRSF (radio control)
+const int pin_crsf_rx = 38;  // CRSF RX (was GPIO 17)
+const int pin_crsf_tx = 36;  // CRSF TX (was TDI)
+
+// GPS
+const int pin_gps_tx = 9;   // GPS TX (was GPIO 25)
+const int pin_gps_rx = 10;  // GPS RX (was GPIO 22)
+
+// Battery voltage (ADC)
+const int pin_battery_voltage = 1;  // ADC input (was SVP/GPIO 36)
+
+// Encoders
+const int pin_right_encoder_a = 2;   // Right encoder A (was GPIO 35)
+const int pin_right_encoder_b = 13;  // Right encoder B (was GPIO 27)
+const int pin_left_encoder_a = 4;    // Left encoder A (was GPIO 33)
+const int pin_left_encoder_b = 12;   // Left encoder B (was GPIO 34)
+
+// Motor control
+const int pin_left_fwd = 44;  // Left motor forward (was GPIO 32)
+const int pin_left_rev = 37;  // Left motor reverse (was GPIO 21)
+const int pin_right_fwd = 5;  // Right motor forward (was GPIO 18)
+const int pin_right_rev = 3;  // Right motor reverse (was GPIO 26)
+
+// ToF power control
+const int pin_left_tof_power = 6;    // Left ToF power (was GPIO 19)
+const int pin_center_tof_power = 7;  // Center ToF power (was GPIO 23)
+const int pin_right_tof_power = 8;   // Right ToF power (was GPIO 5)
 
 
 
@@ -285,12 +321,14 @@ rcl_publisher_t log_publisher;
 rcl_publisher_t rosout_publisher;
 rcl_publisher_t battery_publisher;
 rcl_publisher_t update_publisher;
+rcl_publisher_t nav_sat_fix_publisher;
 
 sensor_msgs__msg__Range tof_distance_msg;
 std_msgs__msg__String log_msg;
 std_msgs__msg__Float32 battery_msg;
 rcl_interfaces__msg__Log rosout_msg;
 white_crash_msgs__msg__Update update_msg;
+sensor_msgs__msg__NavSatFix nav_sat_fix_msg;
 
 rclc_support_t support;
 rcl_allocator_t allocator;
@@ -404,6 +442,12 @@ void create_ros_node_and_publishers() {
       ROSIDL_GET_MSG_TYPE_SUPPORT(white_crash_msgs, msg, Update),
       "/white_crash/update"));
   
+  RCCHECK(rclc_publisher_init_best_effort(
+      &nav_sat_fix_publisher,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, NavSatFix),
+      "/white_crash/gps/fix"));
+  
   for (auto tof : tof_sensors) {
     char topic[30];
     snprintf(topic, sizeof(topic), "/white_crash/%s_distance", tof->name);
@@ -423,6 +467,7 @@ void destroy_ros_node_and_publishers() {
   for (auto tof : tof_sensors) {
     RCCHECK(rcl_publisher_fini(&tof->publisher, &node));
   }
+  RCCHECK(rcl_publisher_fini(&nav_sat_fix_publisher, &node));
 
   RCCHECK(rcl_node_fini(&node));
 }
@@ -517,36 +562,36 @@ void setup_micro_ros_wifi() {
                 timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
 
 
-  // Set GPS time using UTC values from timeinfo with microsecond precision
-  if (gnss.setUTCTimeAssistance(
-    timeinfo.tm_year + 1900,    // Years since 1900
-    timeinfo.tm_mon + 1,        // Months since January (0-11)
-    timeinfo.tm_mday,           // Day of month
-    timeinfo.tm_hour,           // Hour (0-23)
-    timeinfo.tm_min,            // Minutes
-    timeinfo.tm_sec,            // Seconds
-    tv.tv_usec * 1000,         // Convert microseconds to nanoseconds
-    1
+  // // Set GPS time using UTC values from timeinfo with microsecond precision
+  // if (gnss.setUTCTimeAssistance(
+  //   timeinfo.tm_year + 1900,    // Years since 1900
+  //   timeinfo.tm_mon + 1,        // Months since January (0-11)
+  //   timeinfo.tm_mday,           // Day of month
+  //   timeinfo.tm_hour,           // Hour (0-23)
+  //   timeinfo.tm_min,            // Minutes
+  //   timeinfo.tm_sec,            // Seconds
+  //   tv.tv_usec * 1000,         // Convert microseconds to nanoseconds
+  //   1
 
-  )) {
-    Serial.println("Time assistance successful with ns precision");
-  } else {
-    Serial.println("Time assistance failed");
-  }
-    // Set approximate position assistance
-    // Convert degrees to degrees * 1E-7 for u-blox
-    int32_t lat = sidewalk_in_front_of_driveway.lat * 1E7;
-    int32_t lon = sidewalk_in_front_of_driveway.lon * 1E7;
-    int32_t alt = 10 * 100; // ~10m altitude in centimeters
-    uint32_t posAcc = 5000;  // 50m accuracy in centimeters
+  // )) {
+  //   Serial.println("Time assistance successful with ns precision");
+  // } else {
+  //   Serial.println("Time assistance failed");
+  // }
+  //   // Set approximate position assistance
+  //   // Convert degrees to degrees * 1E-7 for u-blox
+  //   int32_t lat = sidewalk_in_front_of_driveway.lat * 1E7;
+  //   int32_t lon = sidewalk_in_front_of_driveway.lon * 1E7;
+  //   int32_t alt = 10 * 100; // ~10m altitude in centimeters
+  //   uint32_t posAcc = 5000;  // 50m accuracy in centimeters
 
-    if (gnss.setPositionAssistanceLLH(lat, lon, alt, posAcc)) {
-        Serial.println("Position assistance successful");
-    } else {
-        Serial.println("Position assistance failed");
-    }
+  //   if (gnss.setPositionAssistanceLLH(lat, lon, alt, posAcc)) {
+  //       Serial.println("Position assistance successful");
+  //   } else {
+  //       Serial.println("Position assistance failed");
+  //   }
 
-    gnss.saveConfiguration();
+    // gnss.saveConfiguration();
 }
 
 //////////////////////////////////
@@ -1131,6 +1176,7 @@ void turn_off_tof_distance_sensor(TofSensor & tof) {
   tof.turn_off_ms = millis();
 }
 
+#ifdef pin_built_in_led
 void flash_forever() {
   pinMode(pin_built_in_led, OUTPUT);
   while(true) {
@@ -1142,6 +1188,7 @@ void flash_forever() {
     delay(250);
   }
 }
+#endif
 
 
 
@@ -1149,8 +1196,10 @@ void flash_forever() {
 // Main setup and loop
 
 void setup() {
+#ifdef pin_built_in_led
   pinMode(pin_built_in_led, OUTPUT);
   digitalWrite(pin_built_in_led, HIGH);
+#endif
   Serial.begin(115200);
 
   SPIFFS.begin();
@@ -1186,6 +1235,11 @@ void setup() {
   strncpy(tof_distance_msg.header.frame_id.data, "tof_frame", 20);
   tof_distance_msg.header.frame_id.size = strlen("tof_frame");
 
+  nav_sat_fix_msg.header.frame_id.data = (char *)malloc(20);
+  nav_sat_fix_msg.header.frame_id.capacity = 20;
+  strncpy(nav_sat_fix_msg.header.frame_id.data, "gps_frame", 20);
+  nav_sat_fix_msg.header.frame_id.size = strlen("gps_frame");
+
   tof_distance_msg.min_range = 0.03;
   tof_distance_msg.max_range = 1.0;
   tof_distance_msg.radiation_type = sensor_msgs__msg__Range__INFRARED;
@@ -1214,35 +1268,46 @@ void setup() {
 
   // In setup(), after gnss.begin():
   if (use_gnss) {
+    
     if (gnss.begin(gnss_serial, 2000, true)) {
+
+      // gnss.factoryReset();
+      // while (true) {
+      //   Serial.println("reset gnss");
+      //   delay(1000);
+      // }
+
         
-      // Configure message output
-      gnss.setUART1Output(COM_TYPE_NMEA | COM_TYPE_UBX);
-      // gnss.enableNMEAMessage(UBX_NMEA_RMC, COM_PORT_UART1);  // Time and date
-      // gnss.enableNMEAMessage(UBX_NMEA_GGA, COM_PORT_UART1);  // Fix data
-      // gnss.enableNMEAMessage(UBX_NMEA_ZDA, COM_PORT_UART1);  // Precise time/date
+      // // Configure message output
+      // gnss.setUART1Output(COM_TYPE_NMEA | COM_TYPE_UBX);
+      gnss.setUART1Output(COM_TYPE_NMEA);
+      gnss.enableNMEAMessage(UBX_NMEA_RMC, COM_PORT_UART1);  // Time and date
+      gnss.enableNMEAMessage(UBX_NMEA_GGA, COM_PORT_UART1);  // Fix data
+      gnss.enableNMEAMessage(UBX_NMEA_ZDA, COM_PORT_UART1);  // Precise time/date
 
       // Enable multiple GNSS constellations
       gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GPS);     // GPS USA
       gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GALILEO); // Galileo Europe
       gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_BEIDOU);  // BeiDou China
       gnss.enableGNSS(true, SFE_UBLOX_GNSS_ID_GLONASS); // GLONASS Russia
-      gnss.setAutoPVT(true); // Automatically send Position, Velocity, Time messages
-      gnss.setAopCfg(true); // Enable AOP (Assisted Orbit Prediction) for faster startup
 
-      gnss.setDynamicModel(DYN_MODEL_PORTABLE);
-      gnss.setUTCTimeAssistance(2025, 4, 6, 12, 0, 0, 0, 3600, 0, 3);
+      // gnss.setAutoPVT(true); // Automatically send Position, Velocity, Time messages
+      
+      // gnss.setAopCfg(true); // Enable AOP (Assisted Orbit Prediction) for faster startup
+
+      // gnss.setDynamicModel(DYN_MODEL_PORTABLE);
+      // gnss.setUTCTimeAssistance(2025, 4, 6, 12, 0, 0, 0, 3600, 0, 3);
 
 
-      // Configure time base and update rate
+      // // Configure time base and update rate
       gnss.setMeasurementRate(100);     // Measurements every 100ms
       gnss.setNavigationFrequency(10);  // Navigation rate 10Hz
 
-      // Save configuration
+      // // Save configuration
       bool success = gnss.saveConfiguration();
       Serial.printf("GPS configuration %s\n", success ? "saved" : "failed to save");
 
-      Serial.println("GPS configured");
+      // Serial.println("GPS configured");
     }
     else {
       Serial.println("GPS failed to initialize");
@@ -1275,9 +1340,10 @@ void setup() {
 
   left_motor.init(pin_left_fwd, pin_left_rev);
   right_motor.init(pin_right_fwd, pin_right_rev);
+#ifdef pin_built_in_led
   pinMode(pin_built_in_led, OUTPUT);
   pinMode(pin_battery_voltage, INPUT);
-
+#endif
   // The input voltage of ADC will be attenuated, extending 
   // the range of measurement to up to approx. 2600 mV. 
   // (1V input = ADC reading of 1575).
@@ -1299,8 +1365,9 @@ void setup() {
   uart_flush_input(0);
   uart_flush_input(1);
 
-
+#ifdef pin_built_in_led
   digitalWrite(pin_built_in_led, 0);
+#endif
 }
 
 
@@ -1456,6 +1523,48 @@ void loop() {
       gps.satellites.value()
     );
   }
+
+if (use_gnss && every_100_ms) {
+  // publish nav_sat_fix message
+  nav_sat_fix_msg.status.service = sensor_msgs__msg__NavSatStatus__SERVICE_GPS;
+
+  // set status based on fix type
+  switch (gnss.getFixType(0)) {
+    case 0:
+      nav_sat_fix_msg.status.status = sensor_msgs__msg__NavSatStatus__STATUS_NO_FIX;
+      break;
+    case 1:
+      nav_sat_fix_msg.status.status = sensor_msgs__msg__NavSatStatus__STATUS_FIX;
+      break;
+    case 2:
+      nav_sat_fix_msg.status.status = sensor_msgs__msg__NavSatStatus__STATUS_SBAS_FIX;
+      break;
+    case 3:
+      nav_sat_fix_msg.status.status = sensor_msgs__msg__NavSatStatus__STATUS_GBAS_FIX;
+      break;
+    default:
+      nav_sat_fix_msg.status.status = sensor_msgs__msg__NavSatStatus__STATUS_NO_FIX;
+      break;
+  }
+
+  if (gnss.getFixType(0) == 0) {
+    nav_sat_fix_msg.latitude = NAN;
+    nav_sat_fix_msg.longitude = NAN;
+    nav_sat_fix_msg.altitude = NAN;
+  } else {
+    nav_sat_fix_msg.position_covariance_type = sensor_msgs__msg__NavSatFix__COVARIANCE_TYPE_APPROXIMATED;
+    nav_sat_fix_msg.latitude = gnss.getLatitude(0) * 1e-7;
+    nav_sat_fix_msg.longitude = gnss.getLongitude(0) * 1e-7;
+    nav_sat_fix_msg.altitude = gnss.getAltitude(0) * 1e-3;
+  }
+
+  // publish nav_sat_fix message
+  if (ros_ready) {
+    set_stamp(nav_sat_fix_msg.header.stamp);
+    RCSOFTCHECK(rcl_publish(&nav_sat_fix_publisher, &nav_sat_fix_msg, NULL));
+  }
+
+};  
 
 // In your logging code, add more debug info:
 if (use_gnss && every_1000_ms) {
@@ -1622,11 +1731,13 @@ if (use_gnss && every_1000_ms) {
   }
 
   // blink for a few ms every second to show signs of life
+#ifdef pin_built_in_led
   if (millis() % 1000 < 5) {
     digitalWrite(pin_built_in_led, HIGH);
   } else {
     digitalWrite(pin_built_in_led, LOW);
   }
+#endif
 
   if (every_1_ms) {
     BlockTimer bt(crsf_stats);

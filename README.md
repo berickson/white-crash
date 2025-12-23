@@ -33,7 +33,10 @@ ros2 topic echo /tank/log --qos-depth 50| grep -E --color=never -o "'.*\'"
 Run Foxglove Bridge
 
 ```bash
+cd
 distrobox enter humble
-source /opt/ros/humble/setup.bash
+~/projects/white-crash/ws
+source install/setup.bash
+#source /opt/ros/humble/setup.bash
 ros2 run foxglove_bridge foxglove_bridge
 ```
