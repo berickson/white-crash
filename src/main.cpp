@@ -1686,8 +1686,7 @@ if (use_gnss && every_1000_ms) {
     }
 
 
-    // const float v_bat_scale = 0.003714; // white-crash s
-    const float v_bat_scale = 0.0077578 * 7.9 / 30. * 7.96 / 3.06; // white-crash m    
+    const float v_bat_scale = 0.00441892139; // white-crash m    
     v_bat = v_bat_scale * sum  / sample_count;
     battery_msg.data = v_bat;
   }
