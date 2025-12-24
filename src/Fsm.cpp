@@ -22,6 +22,7 @@ Fsm::Fsm(std::vector<Task*> _tasks, std::vector<Edge> _edges) {
 
 void Fsm::begin() {
   current_task = tasks[0];
+  current_task->reset_state();
   current_task->begin();
 }
 
@@ -32,7 +33,9 @@ void Fsm::execute() {
 
   current_task->execute();
   if(current_task->is_done()) {
-    set_event("done");
+    if(current_task != NULL) {
+      set_event(current_task->get_completion_event());
+    }
   }
 }
 
@@ -54,7 +57,7 @@ void Fsm::set_current_task(const char * name) {
     if(equals(task->name,name)){
       current_task->end();
       current_task = task;
-      current_task->done = false;
+      current_task->reset_state();
       current_task->begin();
       break;
     }

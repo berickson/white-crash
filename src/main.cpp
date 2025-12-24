@@ -192,10 +192,10 @@ const int pin_left_encoder_a = 4;    // Left encoder A (was GPIO 33)
 const int pin_left_encoder_b = 12;   // Left encoder B (was GPIO 34)
 
 // Motor control
-const int pin_left_fwd = 33;  // Left motor forward (was GPIO 32)
-const int pin_left_rev = 37;  // Left motor reverse (was GPIO 21)
-const int pin_right_fwd = 17;  // Right motor forward (was GPIO 18)
-const int pin_right_rev = 16;  // Right motor reverse (was GPIO 26)
+const int pin_left_fwd = 17;  // Left motor forward (was GPIO 32)
+const int pin_left_rev = 16;  // Left motor reverse (was GPIO 21)
+const int pin_right_fwd = 33;  // Right motor forward (was GPIO 18)
+const int pin_right_rev = 37;  // Right motor reverse (was GPIO 26)
 
 // ToF power control
 const int pin_left_tof_power = 6;    // Left ToF power (was GPIO 19)
@@ -829,6 +829,7 @@ void update_motor_speeds() {
   }
 
   float speed = crsf_ns::crsf_rc_channel_to_float(rx_esc);
+  // str_speed is [-1,1] where negative is left, positive is right
   float str_speed = crsf_ns::crsf_rc_channel_to_float(rx_str);
 
   // only avoid collisions when moving forward
@@ -871,8 +872,8 @@ void update_motor_speeds() {
     str_speed *= scale;
   }
 
-  float right_speed = speed + str_speed;
-  float left_speed = speed - str_speed;
+  float right_speed = speed - str_speed;
+  float left_speed = speed + str_speed;
 
   right_motor.go(scale_motor_command_to_virtual_battery(right_speed), false);
   left_motor.go(scale_motor_command_to_virtual_battery(left_speed), false);
@@ -964,7 +965,6 @@ class OffMode : public Task {
   }
 
   void begin() override {
-    done = false;
     logf("off mode begin");
   }
 
@@ -984,18 +984,27 @@ to the center of a can placed within 3 feet of the robot.
 
 class FindCanMode : public Task {
 public:
-  float rotate_throttle = 0.15;
+  float rotate_throttle = 0.25;
 
   FindCanMode() {
     name = "find-can";
   }
 
   void begin() override {
-    done = false;
-    logf("find can mode begin");
+    // randomly turn left or right at every attempt
+    bool rotate_left = ((millis() % 2) == 1);
 
-    left_motor.go(-1 * rotate_throttle);
-    right_motor.go(rotate_throttle);
+    logf("find can mode begin (rotating %s)", rotate_left ? "left" : "right");
+
+
+    if (rotate_left) {
+      left_motor.go(-1 * rotate_throttle);
+      right_motor.go(rotate_throttle);
+    } else {
+      logf("rotating right");
+      left_motor.go(rotate_throttle);
+      right_motor.go(-1 * rotate_throttle);
+    }
 
   }
 
@@ -1006,7 +1015,7 @@ public:
     logf("distance: %.2f", distance);
 
     if (distance < contest_max_can_distance) {
-      done = true;
+      set_done();
       logf("found the can, ending mode");
     }
   }
@@ -1020,15 +1029,16 @@ public:
 
 class GoToCanMode : public Task {
 public:
-  const float goal_distance = 0.2;
+  const float goal_distance = 0.15;
   const float throttle = 0.2;
+  float last_seen_millis = 0;
 
   GoToCanMode() {
     name = "go-to-can";
   }
 
   void begin() override {
-    done = false;
+    last_seen_millis = millis();
     logf("go-to-can mode begin");
   }
 
@@ -1038,29 +1048,41 @@ public:
     float right_distance = nan_to_max(tof_right.distance);
     float left_distance = nan_to_max(tof_left.distance);
     float center_distance = nan_to_max(tof_center.distance);
+    uint32_t time_since_seen;
 
     float min_distance = std::min({center_distance, left_distance, right_distance});
+    if (min_distance < contest_max_can_distance) {
+      last_seen_millis = millis();
+      time_since_seen = 0;
+    } else {
+      time_since_seen = millis() - last_seen_millis;
+    }
     logf("distance to can %.2f", min_distance);
+
+
+    const float steering_ratio = 1.5;
+    const uint32_t can_lost_timout_ms = 2000;
+
 
     // if any distance is close enough, we are done
     if (min_distance <= goal_distance ) {
-      done = true;
+      set_done();
       logf("we are close enough to the can");
-    } else if (min_distance > contest_max_can_distance) {
+    } else if (time_since_seen > can_lost_timout_ms) {
         logf("lost the can, giving up");
-        done = true;
+        set_done("lost-can");
     } else if (center_distance == min_distance) {
       // if center is the min distance, go there
       left_motor.go(throttle);
       right_motor.go(throttle);
     } else if (right_distance == min_distance) {
       // if right is the min distance, go there
-      right_motor.go(throttle * 1.5);
-      left_motor.go(throttle / 1.5);
+      right_motor.go(throttle / steering_ratio);
+      left_motor.go(throttle * steering_ratio);
     } else {
       // left distance must be the min, go there
-      right_motor.go(throttle / 1.5);
-      left_motor.go(throttle * 1.5);
+      right_motor.go(throttle * steering_ratio);
+      left_motor.go(throttle / steering_ratio);
     }
 
   }
@@ -1086,7 +1108,6 @@ class AutoMode : public Task {
   int step = 0;
 
   void begin() override {
-    done = false;
     logf("auto mode begin");
     step = 0;
   }
@@ -1128,7 +1149,7 @@ class AutoMode : public Task {
       Serial.printf("arrived at waypoint %d ", step);
       step++;
       if (step >= route_waypoints.size()) {
-        done = true;
+        set_done();
         Serial.write(", done with route\n");
       } else {
         Serial.printf("going to waypoint %d\n", step);
@@ -1180,6 +1201,7 @@ std::vector<Fsm::Edge> edges = {
     Fsm::Edge("find-can", "rc-moved", "hand"),
     Fsm::Edge("find-can", "done", "go-to-can"),
     Fsm::Edge("go-to-can", "done", "hand"),
+    Fsm::Edge("go-to-can", "lost-can", "find-can"),
     Fsm::Edge("go-to-can", "rc-moved", "hand"),
     Fsm::Edge("*", "off", "off"),
 };
@@ -1802,7 +1824,7 @@ if (use_gnss && every_minute) {
     battery_msg.data = v_bat;
   }
 
-  if (every_100_ms) {
+  if (every_10_ms) {
     HangChecker hc("fsm");
     fsm.execute();
   }
