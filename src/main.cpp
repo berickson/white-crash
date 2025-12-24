@@ -82,6 +82,8 @@ std::vector<lat_lon> route_waypoints = {
     sidewalk_in_front_of_driveway,
 };
 
+float contest_max_can_distance = 1.0;
+
 // where we store the compass calibration
 const char *compass_calibration_file_path = "/compass_calibration.txt";
 
@@ -313,6 +315,12 @@ RunStatistics tof_distance_stats("tof_distance");
 StuckChecker left_stuck_checker;
 StuckChecker right_stuck_checker;
 
+//////////////////////////////////
+// Helpers
+// converts nan values to max, good for range sensor math
+float nan_to_max(float v) {
+  return isnan(v) ? std::numeric_limits<float>::max() : v;
+}
 
 
 //////////////////////////////////
@@ -976,8 +984,7 @@ to the center of a can placed within 3 feet of the robot.
 
 class FindCanMode : public Task {
 public:
-  float rotate_throttle = 0.2;
-  float contest_max_can_distance = 1.5; // meters
+  float rotate_throttle = 0.15;
 
   FindCanMode() {
     name = "find-can";
@@ -993,10 +1000,12 @@ public:
   }
 
   void execute() override {
-    // turn left
-    logf("TOF center distance: %.2f", tof_center.distance);
 
-    if (!isnan(tof_center.distance) && tof_center.distance < contest_max_can_distance) {
+    float distance = std::min({nan_to_max(tof_left.distance), nan_to_max(tof_center.distance), nan_to_max(tof_right.distance)});
+    // turn left
+    logf("distance: %.2f", distance);
+
+    if (distance < contest_max_can_distance) {
       done = true;
       logf("found the can, ending mode");
     }
@@ -1008,6 +1017,61 @@ public:
     logf("find-can mode complete");
   }
 } find_can_mode;
+
+class GoToCanMode : public Task {
+public:
+  const float goal_distance = 0.2;
+  const float throttle = 0.2;
+
+  GoToCanMode() {
+    name = "go-to-can";
+  }
+
+  void begin() override {
+    done = false;
+    logf("go-to-can mode begin");
+  }
+
+  void execute() override {
+
+
+    float right_distance = nan_to_max(tof_right.distance);
+    float left_distance = nan_to_max(tof_left.distance);
+    float center_distance = nan_to_max(tof_center.distance);
+
+    float min_distance = std::min({center_distance, left_distance, right_distance});
+    logf("distance to can %.2f", min_distance);
+
+    // if any distance is close enough, we are done
+    if (min_distance <= goal_distance ) {
+      done = true;
+      logf("we are close enough to the can");
+    } else if (min_distance > contest_max_can_distance) {
+        logf("lost the can, giving up");
+        done = true;
+    } else if (center_distance == min_distance) {
+      // if center is the min distance, go there
+      left_motor.go(throttle);
+      right_motor.go(throttle);
+    } else if (right_distance == min_distance) {
+      // if right is the min distance, go there
+      right_motor.go(throttle * 1.5);
+      left_motor.go(throttle / 1.5);
+    } else {
+      // left distance must be the min, go there
+      right_motor.go(throttle / 1.5);
+      left_motor.go(throttle * 1.5);
+    }
+
+  }
+
+  void end() override {
+    left_motor.go(0);
+    right_motor.go(0);
+    logf("go-to-can mode complete");
+  }
+
+} go_to_can_mode;
 
 class AutoMode : public Task {
  public:
@@ -1097,7 +1161,8 @@ std::vector<Task *> tasks = {
     &auto_mode,
     &failsafe_mode,
     &calibrate_compass_mode,
-    &find_can_mode
+    &find_can_mode,
+    &go_to_can_mode
 };
 
 std::vector<Fsm::Edge> edges = {
@@ -1113,7 +1178,9 @@ std::vector<Fsm::Edge> edges = {
     Fsm::Edge("off", "hand", "hand"),
     Fsm::Edge("hand", "sd-click", "find-can"),
     Fsm::Edge("find-can", "rc-moved", "hand"),
-    Fsm::Edge("find-can", "done", "hand"),
+    Fsm::Edge("find-can", "done", "go-to-can"),
+    Fsm::Edge("go-to-can", "done", "hand"),
+    Fsm::Edge("go-to-can", "rc-moved", "hand"),
     Fsm::Edge("*", "off", "off"),
 };
 
