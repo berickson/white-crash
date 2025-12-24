@@ -253,7 +253,7 @@ std::vector<TofSensor * > tof_sensors = {
 33 ms is the minimum timing budget which can work for all distance modes.
 140 ms is the timing budget which allows the maximum distance of 4 m (in the dark on a white chart) to be reached with long distance mode
 */
-uint32_t tof_timing_budget_ms = 33;
+uint32_t tof_timing_budget_ms = 20;
 
 AK8975Compass compass(Wire, 0x0E);
 QuadratureEncoder left_encoder(pin_left_encoder_a, pin_left_encoder_b, meters_per_odometer_tick);
@@ -266,6 +266,7 @@ int rx_str = 0;
 int rx_esc = 0;
 int rx_aux = 0;
 bool button_sc_pressed = false;
+bool button_sd_pressed = false;
 bool toggle_a_enabled = false;
 bool toggle_b_enabled = false;
 float p1_knob_percent = NAN;
@@ -635,6 +636,7 @@ void handle_rc_message(crsf_ns::RcData &rc_data) {
     rx_esc = rc_data.channels[1];
     rx_aux = rc_data.channels[2];
     button_sc_pressed = crsf_ns::crsf_rc_channel_to_bool(rc_data.channels[6]);
+    button_sd_pressed =  crsf_ns::crsf_rc_channel_to_bool(rc_data.channels[7]);
     toggle_a_enabled = crsf_ns::crsf_rc_channel_to_bool(rc_data.channels[8]);
     toggle_b_enabled = crsf_ns::crsf_rc_channel_to_bool(rc_data.channels[9]);
     p1_knob_percent = crsf_ns::crsf_rc_channel_to_ratio(rc_data.channels[4]);
@@ -669,11 +671,12 @@ void handle_rc_message(crsf_ns::RcData &rc_data) {
 
   // log the inputs
   if (false && message_count % 100 == 0) {
-    logf("rc str: %d esc: %d aux: %d sc: %d a: %d b: %d p1: %0.4f p2: %0.4f",
+    logf("rc str: %d esc: %d aux: %d sc: %d sd: %d a: %d b: %d p1: %0.4f p2: %0.4f",
         rx_str,
         rx_esc,
         rx_aux,
         button_sc_pressed,
+        button_sd_pressed,
         toggle_a_enabled,
         toggle_b_enabled,
         p1_knob_percent,
@@ -965,6 +968,47 @@ class OffMode : public Task {
 
 } off_mode;
 
+
+/*
+this task will rotate the robot in place until is pointing
+to the center of a can placed within 3 feet of the robot.
+*/
+
+class FindCanMode : public Task {
+public:
+  float rotate_throttle = 0.2;
+  float contest_max_can_distance = 1.5; // meters
+
+  FindCanMode() {
+    name = "find-can";
+  }
+
+  void begin() override {
+    done = false;
+    logf("find can mode begin");
+
+    left_motor.go(-1 * rotate_throttle);
+    right_motor.go(rotate_throttle);
+
+  }
+
+  void execute() override {
+    // turn left
+    logf("TOF center distance: %.2f", tof_center.distance);
+
+    if (!isnan(tof_center.distance) && tof_center.distance < contest_max_can_distance) {
+      done = true;
+      logf("found the can, ending mode");
+    }
+  }
+
+  void end() override {
+    left_motor.go(0);
+    right_motor.go(0);
+    logf("find-can mode complete");
+  }
+} find_can_mode;
+
 class AutoMode : public Task {
  public:
   bool unsticking = false;
@@ -1053,6 +1097,7 @@ std::vector<Task *> tasks = {
     &auto_mode,
     &failsafe_mode,
     &calibrate_compass_mode,
+    &find_can_mode
 };
 
 std::vector<Fsm::Edge> edges = {
@@ -1066,6 +1111,9 @@ std::vector<Fsm::Edge> edges = {
     Fsm::Edge("auto", "hand", "hand"),
     Fsm::Edge("auto", "rc-moved", "hand"),
     Fsm::Edge("off", "hand", "hand"),
+    Fsm::Edge("hand", "sd-click", "find-can"),
+    Fsm::Edge("find-can", "rc-moved", "hand"),
+    Fsm::Edge("find-can", "done", "hand"),
     Fsm::Edge("*", "off", "off"),
 };
 
@@ -1716,6 +1764,7 @@ if (use_gnss && every_minute) {
     HangChecker hc("mode event");
     static aux_mode_t last_aux_mode = aux_mode_failsafe;
     static bool last_button_sc_pressed = false;
+    static bool last_button_sd_pressed = false;
     static int last_rx_str = 0;
     static int last_rx_esc = 0;
 
@@ -1754,6 +1803,12 @@ if (use_gnss && every_minute) {
       logf("sc-click");
     }
 
+    // sd event
+    if (button_sd_pressed && !last_button_sd_pressed) {
+      fsm.set_event("sd-click");
+      logf("sd-click");
+    }
+
     // rc moved event
     {
       using namespace crsf_ns;
@@ -1764,6 +1819,7 @@ if (use_gnss && every_minute) {
 
     last_aux_mode = aux_mode;
     last_button_sc_pressed = button_sc_pressed;
+    last_button_sd_pressed = button_sd_pressed;
     last_rx_str = rx_str;
     last_rx_esc = rx_esc;
   }
