@@ -91,6 +91,7 @@ float contest_max_can_distance = 1.0;
 
 // where we store the compass calibration
 const char *compass_calibration_file_path = "/compass_calibration.txt";
+const char *bno055_calibration_file_path = "/bno055_calibration.txt";
 
 //////////////////////////////////
 // pin assignments
@@ -1802,6 +1803,69 @@ bool load_compass_calibration_from_spiffs() {
   return true;
 }
 
+bool save_bno055_calibration_to_spiffs(const adafruit_bno055_offsets_t& offsets) {
+  File file = SPIFFS.open(bno055_calibration_file_path, FILE_WRITE);
+  if (!file) {
+    logf("Failed to open BNO055 calibration file for writing");
+    return false;
+  }
+
+  // Write all 11 offset values as comma-separated integers
+  file.printf("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+    offsets.accel_offset_x, offsets.accel_offset_y, offsets.accel_offset_z,
+    offsets.mag_offset_x, offsets.mag_offset_y, offsets.mag_offset_z,
+    offsets.gyro_offset_x, offsets.gyro_offset_y, offsets.gyro_offset_z,
+    offsets.accel_radius, offsets.mag_radius);
+  
+  file.close();
+  logf("BNO055 calibration saved to SPIFFS");
+  return true;
+}
+
+bool load_bno055_calibration_from_spiffs() {
+  if (!SPIFFS.exists(bno055_calibration_file_path)) {
+    logf("No BNO055 calibration file found");
+    return false;
+  }
+
+  File file = SPIFFS.open(bno055_calibration_file_path, FILE_READ);
+  if (!file) {
+    logf("Failed to open BNO055 calibration file");
+    return false;
+  }
+
+  String content = file.readStringUntil('\n');
+  file.close();
+
+  // Parse comma-separated values - expecting 11 int16_t values
+  int commas[10];
+  commas[0] = content.indexOf(',');
+  for (int i = 1; i < 10; i++) {
+    commas[i] = content.indexOf(',', commas[i-1] + 1);
+    if (commas[i] == -1) {
+      logf("Invalid BNO055 calibration format - missing comma %d", i);
+      return false;
+    }
+  }
+
+  adafruit_bno055_offsets_t offsets;
+  offsets.accel_offset_x = content.substring(0, commas[0]).toInt();
+  offsets.accel_offset_y = content.substring(commas[0] + 1, commas[1]).toInt();
+  offsets.accel_offset_z = content.substring(commas[1] + 1, commas[2]).toInt();
+  offsets.mag_offset_x = content.substring(commas[2] + 1, commas[3]).toInt();
+  offsets.mag_offset_y = content.substring(commas[3] + 1, commas[4]).toInt();
+  offsets.mag_offset_z = content.substring(commas[4] + 1, commas[5]).toInt();
+  offsets.gyro_offset_x = content.substring(commas[5] + 1, commas[6]).toInt();
+  offsets.gyro_offset_y = content.substring(commas[6] + 1, commas[7]).toInt();
+  offsets.gyro_offset_z = content.substring(commas[7] + 1, commas[8]).toInt();
+  offsets.accel_radius = content.substring(commas[8] + 1, commas[9]).toInt();
+  offsets.mag_radius = content.substring(commas[9] + 1).toInt();
+
+  bno.setSensorOffsets(offsets);
+  logf("BNO055 calibration loaded from SPIFFS");
+  return true;
+}
+
 void start_tof_distance_sensor(TofSensor & tof) {
   pinMode(tof.power_pin, OUTPUT);
   digitalWrite(tof.power_pin, HIGH);
@@ -1981,6 +2045,11 @@ void setup() {
 
   bno.setAxisRemap(Adafruit_BNO055::REMAP_CONFIG_P1);
   bno.setAxisSign(Adafruit_BNO055::REMAP_SIGN_P1);
+
+  Serial.printf("Loading BNO055 calibration\n");
+  load_bno055_calibration_from_spiffs();
+
+  // Crystal must be configured AFTER loading calibration data into BNO055
   bno.setExtCrystalUse(true);
 
   //Wire1.setPins(pin_tof_sda, pin_tof_scl);
@@ -2185,11 +2254,23 @@ void loop() {
   }
 
   if (every_1000_ms) {
-      uint8_t system, gyro, accel, mag;
-      bno.getCalibration(&system, &gyro, &accel, &mag);
-      
-      Serial.printf("Bno Calibration status sytem: %d gyro %d accel: %d mag: %d\n", system, gyro, accel, mag);
+    static bool calibration_achieved = false;
+    uint8_t system, gyro, accel, mag;
+    bno.getCalibration(&system, &gyro, &accel, &mag);
+    Serial.printf("Bno Calibration status sytem: %d gyro %d accel: %d mag: %d\n", system, gyro, accel, mag);
+
+    // save calibration constants once we are fully calibrated
+    if (!calibration_achieved && system == 3 && gyro == 3 && accel == 3 && mag == 3) {
+      Serial.printf("Saving bno055 calibration\n");
+      adafruit_bno055_offsets_t offsets;
+      if (bno.getSensorOffsets(offsets)) {
+        if (save_bno055_calibration_to_spiffs(offsets)) {
+          calibration_achieved = true;
+        }
+      }
+    }
   }
+
 
 
   // tof distance
