@@ -10,6 +10,10 @@
 #include "Fsm.h"
 #include "TinyGPS++.h"
 #include "drv8833.h"
+
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+
 #include "quadrature_encoder.h"
 #include "speedometer.h"
 
@@ -172,8 +176,8 @@ const int pin_right_tof_power = pin_gpio_5;
 // LOLIN pins
 // S3 Mini pin mapping - ACTUAL WIRING
 // I2C - using default S3 I2C pins
-const int pin_sda = 34;   // I2C SDA (default for S3, was GPIO 4 on old board)
-const int pin_scl = 35;   // I2C SCL (default for S3, was GPIO 16 on old board)
+const int pin_sda = 34;   // Yellow I2C SDA
+const int pin_scl = 35;   // Blue I2C SCL
 
 // CRSF (radio control)
 const int pin_crsf_rx = 38;  // CRSF RX (was GPIO 17)
@@ -259,6 +263,11 @@ std::vector<TofSensor * > tof_sensors = {
 uint32_t tof_timing_budget_ms = 20;
 
 AK8975Compass compass(Wire, 0x0E);
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28, &Wire);
+imu::Vector<3> bno_orientation;
+imu::Vector<3> bno_acceleration;
+
+
 QuadratureEncoder left_encoder(pin_left_encoder_a, pin_left_encoder_b, meters_per_odometer_tick);
 QuadratureEncoder right_encoder(pin_right_encoder_a, pin_right_encoder_b, meters_per_odometer_tick);
 
@@ -1896,8 +1905,9 @@ void setup() {
   Serial.begin(3000000);
 
   // note: it takes about 1.8 sconds after boot for serial messages to show in platformio
-  // delay(2000);  // Wait for serial to be ready
+  delay(2000);  // Wait for serial to be ready
   Serial.printf("[%lu ms] Setup starting\n", millis());
+
 
   // int i = 0;
   // do {
@@ -1957,6 +1967,21 @@ void setup() {
   Wire.begin();
   Wire.setTimeOut(5); // ms
   Serial.printf("[%lu ms] I2C initialized\n", millis());
+
+
+  Serial.printf("Starting BNO055\n");
+  if(!bno.begin())
+  {
+    /* There was a problem detecting the BNO055 ... check your connections */
+    Serial.println("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
+    while(1);
+  }
+
+  Serial.println("bno055 begin successful");
+
+  bno.setAxisRemap(Adafruit_BNO055::REMAP_CONFIG_P1);
+  bno.setAxisSign(Adafruit_BNO055::REMAP_SIGN_P1);
+  bno.setExtCrystalUse(true);
 
   //Wire1.setPins(pin_tof_sda, pin_tof_scl);
   //Wire1.begin();
@@ -2140,11 +2165,30 @@ void loop() {
     update_msg.mag_x = compass.last_reading.x;
     update_msg.mag_y = compass.last_reading.y;
     update_msg.mag_z = compass.last_reading.z;
+    update_msg.yaw = bno_orientation.x();
+    update_msg.pitch = bno_orientation.y();
+    update_msg.roll = bno_orientation.z();
+    update_msg.acceleration_x = bno_acceleration.x();
+    update_msg.acceleration_y = bno_acceleration.y();
+    update_msg.acceleration_z = bno_acceleration.z();
+
 
     if (ros_ready) {
       // publish update message
       RCSOFTCHECK(rcl_publish(&update_publisher, &update_msg, NULL));
     }
+  }
+
+  if (every_10_ms) {
+    bno_orientation = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
+    bno_acceleration = bno.getVector(Adafruit_BNO055::VECTOR_LINEARACCEL);
+  }
+
+  if (every_1000_ms) {
+      uint8_t system, gyro, accel, mag;
+      bno.getCalibration(&system, &gyro, &accel, &mag);
+      
+      Serial.printf("Bno Calibration status sytem: %d gyro %d accel: %d mag: %d\n", system, gyro, accel, mag);
   }
 
 

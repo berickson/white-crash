@@ -11,3 +11,9 @@ float32 yaw_degrees
 int16   mag_x
 int16   mag_y
 int16   mag_z
+float32 yaw
+float32 pitch
+float32 roll
+float32 acceleration_x
+float32 acceleration_y
+float32 acceleration_z
