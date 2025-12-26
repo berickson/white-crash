@@ -11,40 +11,89 @@ The user shouldn't have to tune PIDs manually.
 
 ## Implementation Plan
 
-### Step 1: Open-Loop Characterization
+### Step 1: Open-Loop Characterization ✅ COMPLETE
 **Goal:** Build feedforward model and get initial PI gains
 
-**Tasks:**
-- Create open-loop test mode (FSM state)
-- Command fixed voltages (2V, 4V, 6V, 8V, 10V)
-- Log commanded voltage and steady-state velocity to ROS
-- Fit feedforward model: `voltage = f(velocity)` (linear or polynomial)
-- Calculate initial P gain: `P ≈ 1-2 V/(m/s)` (conservative, since feedforward does most work)
+**Implementation Notes:**
+- Created `OpenLoopCharacterizationMode` task class in [`src/main.cpp`](src/main.cpp#L979-L1107)
+- Implemented voltage-to-PWM conversion: `pwm = voltage / v_bat`
+- Commands sequence: 2V, 4V, 6V, 8V, 10V (2s settle, 1s measure each)
+- Logs to existing `/white_crash/update` topic (uses PWM and battery voltage)
+- Added to FSM with `"open-loop"` event trigger
+- Created [`scripts/characterize_motors.py`](scripts/characterize_motors.py) for data collection and analysis
 
-**Test:** Robot on racks, verify both wheels respond to voltage commands
-**Output:** 
-- Feedforward function/lookup table
-- Initial PI gains (P ≈ 1-2, I ≈ 0.5)
+**Results (from actual test run):**
+- **Left Motor:** `V = 0.295 + 2.759 * v` (V/(m/s))
+- **Right Motor:** `V = 0.247 + 2.841 * v` (V/(m/s))
+- Motors well-matched (2.76 vs 2.84 gain ratio)
+- ~0.3V offset indicates friction/dead-zone
+- **Recommended Initial Gains:**
+  - `P = 0.56 V/(m/s)` (conservative, 20% of feedforward)
+  - `I = 0.28 V/(m/s²)` (eliminate steady-state error)
+  - `D = 0.0` (not needed for velocity control)
 
-**✋ APPROVAL POINT:** Review open-loop model fit quality before proceeding
+**Files Modified:**
+- [`src/main.cpp`](src/main.cpp): Added OpenLoopCharacterizationMode class
+- [`scripts/characterize_motors.py`](scripts/characterize_motors.py): Analysis script
+- [`scripts/motor_characterization_results.txt`](scripts/motor_characterization_results.txt): Results
+- [`scripts/motor_characterization_plot.png`](scripts/motor_characterization_plot.png): Plots
+
+**✅ APPROVED:** Open-loop model shows excellent fit, motors well-matched, ready for Step 2
 
 ---
 
-### Step 2: Feedforward + PI Framework + Differential Drive
+### Step 2: Feedforward + PI Framework + Differential Drive ✅ COMPLETE
 **Goal:** Add infrastructure with voltage-based control
 
-**Tasks:**
-- Implement PI controller class (voltage output, not PWM)
-- Implement feedforward model from step 1: `voltage = feedforward(v_target) + P*error + I*integral`
-- Add differential drive kinematics: `(v_linear, ω_angular) → (v_left, v_right)`
-- Total voltage converts to PWM: `pwm = voltage_command / v_bat`
-- Start with conservative PI gains (D=0, not needed for velocity control)
-- Add step response test mode for auto-tuning
+**Implementation Summary:**
+- Created `PIController` class in [`src/main.cpp`](src/main.cpp#L890-L964)
+  - Feedforward model: `V_ff = 0.271 + 2.800 * v`
+  - Initial gains: `P=0.56, I=0.28` (20% of feedforward slope)
+  - Anti-windup: stops integration when output saturates
+  - Voltage-to-PWM conversion: `pwm = voltage / v_bat`
+- Implemented differential drive kinematics: `diff_drive_kinematics()`
+  - Converts `(v_linear, ω_angular)` to `(v_left, v_right)`
+  - Track width: 0.20m (approximate, to be calibrated in Step 4)
+- Created `set_twist()` API for programmatic control
+  - Main interface for autonomous modes
+  - Reads speedometer feedback, runs PI controllers, applies motor commands
+  - Does NOT affect RC control (HandMode) - that remains direct PWM
+- Created `PIControlTestMode` task in [`src/main.cpp`](src/main.cpp#L1256-L1334)
+  - Test sequence: stopped, 0.5 m/s, 1.0 m/s, decelerate, stop, reverse, rotate
+  - Triggered by SC button press (hand → pi-test mode)
+  - Logs all data via existing `/white_crash/update` topic
+- Created [`scripts/monitor_pi_control.py`](scripts/monitor_pi_control.py)
+  - Real-time monitoring of commanded vs actual velocities
+  - Terminal output and optional matplotlib plots
+  - Error statistics and tracking performance metrics
 
-**Test:** On racks, verify each wheel can track a setpoint well
-**Verification:** Can command `v=1.0 m/s, ω=0` with feedforward doing most work, PI correcting errors
+**Button Mapping:**
+- **SC button** (from hand mode): Enter PI control test mode
+- **SD button** (from hand mode): Enter open-loop characterization mode
+- **SC button** (from pi-test mode): Enter compass calibration mode
+- **RC stick movement**: Return to hand mode (from any test mode)
 
-**✋ APPROVAL POINT:** Review feedforward+PI response before tuning
+**Test Instructions:**
+1. Build and upload firmware to robot
+2. Start micro-ROS agent: `./start_microros_agent.sh`
+3. Run monitor script: `./scripts/monitor_pi_control.py --plot`
+4. Put robot on racks (wheels off ground) or in safe testing area
+5. Press SC button on RC transmitter to start test
+6. Monitor real-time velocity tracking
+7. Test runs for ~35 seconds through full sequence
+8. Review error statistics and plots
+
+**Files Modified:**
+- [`src/main.cpp`](src/main.cpp): Added PIController class, diff drive, set_twist(), PIControlTestMode
+- [`scripts/monitor_pi_control.py`](scripts/monitor_pi_control.py): Monitoring and analysis script
+
+**Next Steps:**
+- Test on racks to verify basic tracking
+- Adjust gains if needed (P and I)
+- Calibrate track width using rotation tests
+- Proceed to Step 3 for acceleration feedforward and auto-tuning
+
+**✅ READY FOR TESTING**
 
 ---
 

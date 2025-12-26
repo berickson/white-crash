@@ -1,0 +1,17 @@
+Motor Characterization Results
+============================================================
+
+Feedforward Model: voltage = offset + gain * velocity
+
+Left Motor:
+  offset = 0.295 V
+  gain   = 2.759 V/(m/s)
+
+Right Motor:
+  offset = 0.247 V
+  gain   = 2.841 V/(m/s)
+
+Recommended Initial PI Gains:
+  P = 0.56 V/(m/s)
+  I = 0.28 V/(m/s*s)
+  D = 0.0

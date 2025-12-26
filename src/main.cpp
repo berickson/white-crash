@@ -26,6 +26,7 @@
 #include <std_msgs/msg/string.h>
 #include <sensor_msgs/msg/nav_sat_fix.h>
 #include <sensor_msgs/msg/range.h>
+#include <geometry_msgs/msg/twist.h>
 
 #include <white_crash_msgs/msg/update.h>
 
@@ -55,7 +56,7 @@ const bool enable_stats_logging = true;
 
 // calibration constants
 //float meters_per_odometer_tick = 0.00008204; // S
-float meters_per_odometer_tick = 0.00065136; // M
+float meters_per_odometer_tick = 0.000653; // M
 
 // hard code some interesting gps locations
 class lat_lon {
@@ -332,12 +333,22 @@ rcl_publisher_t battery_publisher;
 rcl_publisher_t update_publisher;
 rcl_publisher_t nav_sat_fix_publisher;
 
+rcl_subscription_t cmd_vel_subscription;
+rclc_executor_t executor;
+
 sensor_msgs__msg__Range tof_distance_msg;
 std_msgs__msg__String log_msg;
 std_msgs__msg__Float32 battery_msg;
 rcl_interfaces__msg__Log rosout_msg;
 white_crash_msgs__msg__Update update_msg;
 sensor_msgs__msg__NavSatFix nav_sat_fix_msg;
+geometry_msgs__msg__Twist cmd_vel_msg;
+
+// cmd_vel state
+float cmd_vel_linear = 0.0;
+float cmd_vel_angular = 0.0;
+unsigned long cmd_vel_last_received_ms = 0;
+const unsigned long cmd_vel_timeout_ms = 500;
 
 rclc_support_t support;
 rcl_allocator_t allocator;
@@ -412,6 +423,16 @@ void logf(const char *format, ...) {
   log_rosout(rosout_msg);
 }
 
+// cmd_vel subscription callback
+void cmd_vel_callback(const void *msgin) {
+  const geometry_msgs__msg__Twist *msg = (const geometry_msgs__msg__Twist *)msgin;
+  cmd_vel_linear = msg->linear.x;
+  cmd_vel_angular = msg->angular.z;
+  cmd_vel_last_received_ms = millis();
+
+  logf("got a cmd_vel message v: %.2f w: %2f", cmd_vel_linear, cmd_vel_angular);
+}
+
 void error_loop() {
   while (true) {
     Serial.printf("error in micro_ros, error_loop() entered\n");
@@ -466,9 +487,22 @@ void create_ros_node_and_publishers() {
         ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range),
         topic));
   }
+
+  // create cmd_vel subscription
+  RCCHECK(rclc_subscription_init_best_effort(
+      &cmd_vel_subscription,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+      "/white_crash/cmd_vel"));
+
+  // create executor
+  RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
+  RCCHECK(rclc_executor_add_subscription(&executor, &cmd_vel_subscription, &cmd_vel_msg, &cmd_vel_callback, ON_NEW_DATA));
 }
 
 void destroy_ros_node_and_publishers() { 
+  RCCHECK(rclc_executor_fini(&executor));
+  RCCHECK(rcl_subscription_fini(&cmd_vel_subscription, &node));
   RCCHECK(rcl_publisher_fini(&log_publisher, &node));
   RCCHECK(rcl_publisher_fini(&battery_publisher, &node));
   RCCHECK(rcl_publisher_fini(&rosout_publisher, &node));
@@ -884,8 +918,250 @@ void update_compass_calibration(int min_x, int max_x, int min_y, int max_y, int 
   compass.set_calibration(min_x, max_x, min_y, max_y, min_z, max_z);
   logf("updated compass calibration to %d %d %d %d %d %d", min_x, max_x, min_y, max_y, min_z, max_z);
 }
+
+//////////////////////////////////
+// PI Controller for Speed Control
+
+/**
+ * PI Controller with Feedforward for velocity control.
+ * Outputs voltage command from target velocity, actual velocity, and time delta.
+ * Uses feedforward model from Step 1 characterization plus PI correction.
+ */
+class PIController {
+ private:
+  // Feedforward model parameters (from Step 1 characterization)
+  // V_ff(v) = ff_offset + ff_gain * v
+  const float ff_offset = 0.271;  // Volts
+  const float ff_gain = 2.800;    // V/(m/s)
+  
+  // PI gains (from Step 1 recommendations)
+  float kp = 0.56;   // V/(m/s) - proportional gain
+  float ki = 2.0;    // V/(m/s²) - integral gain (increased for faster dead zone breakthrough)
+  
+  // Controller state
+  float error_integral = 0.0;  // Accumulated error (m·s)
+  float last_target_sign = 0.0; // Track sign changes to reset integral
+  
+  // Anti-windup limits
+  const float max_voltage = 12.0;  // Volts
+  const float min_voltage = -12.0; // Volts
+  const float max_integral = 1.0;  // Max accumulated error (m·s) - limits integral windup
+  
+ public:
+  PIController() {}
+  
+  /**
+   * Compute control output.
+   * @param v_target Target velocity (m/s)
+   * @param v_actual Actual velocity from speedometer (m/s)
+   * @param dt Time step (seconds)
+   * @return Voltage command (Volts)
+   */
+  float compute(float v_target, float v_actual, float dt) {
+    // Reset integral if target changes sign (forward ↔ reverse)
+    // This prevents accumulated error from one direction affecting the other
+    float current_target_sign = (v_target > 0.01) ? 1.0 : ((v_target < -0.01) ? -1.0 : 0.0);
+    if (last_target_sign != 0.0 && current_target_sign != 0.0 && 
+        last_target_sign != current_target_sign) {
+      error_integral = 0.0;
+    }
+    last_target_sign = current_target_sign;
+    
+    // Reset integral if target is near zero (stopped) to prevent drift
+    if (abs(v_target) < 0.01) {
+      error_integral = 0.0;
+    }
+    
+    // Feedforward term - handles most of the steady-state control
+    // For reverse motion, the offset must be negative
+    float v_feedforward;
+    if (v_target >= 0) {
+      v_feedforward = ff_offset + ff_gain * v_target;
+    } else {
+      v_feedforward = -ff_offset + ff_gain * v_target;
+    }
+    
+    // PI correction
+    float error = v_target - v_actual;
+    error_integral += error * dt;
+    
+    // Clamp integral to prevent unbounded growth
+    error_integral = constrain(error_integral, -max_integral, max_integral);
+    
+    float v_pi = kp * error + ki * error_integral;
+    
+    // Total voltage command
+    float v_total = v_feedforward + v_pi;
+    
+    // Anti-windup: back-calculate integral if output saturates
+    // This prevents integral from growing while output is clamped
+    if (v_total > max_voltage) {
+      v_total = max_voltage;
+      // Back-calculate what integral should be at saturation
+      float max_pi = v_total - v_feedforward;
+      error_integral = (max_pi - kp * error) / ki;
+    } else if (v_total < min_voltage) {
+      v_total = min_voltage;
+      float min_pi = v_total - v_feedforward;
+      error_integral = (min_pi - kp * error) / ki;
+    }
+    
+    return v_total;
+  }
+  
+  /**
+   * Reset controller state (e.g., when starting control)
+   */
+  void reset() {
+    error_integral = 0.0;
+    last_target_sign = 0.0;
+  }
+  
+  /**
+   * Set controller gains (for tuning)
+   */
+  void set_gains(float p, float i) {
+    kp = p;
+    ki = i;
+  }
+};
+
+// Instantiate PI controllers for left and right wheels
+PIController left_wheel_controller;
+PIController right_wheel_controller;
+
+//////////////////////////////////
+// Differential Drive Kinematics
+
+// Track width (wheelbase) in meters - approximate for now
+// TODO: Calibrate this value through rotation tests
+const float track_width = 0.20;  // 20cm estimate
+
+/**
+ * Convert linear and angular velocity to individual wheel velocities.
+ * @param v_linear Linear velocity (m/s), positive = forward
+ * @param omega_angular Angular velocity (rad/s), positive = counter-clockwise
+ * @param v_left Output left wheel velocity (m/s)
+ * @param v_right Output right wheel velocity (m/s)
+ */
+void diff_drive_kinematics(float v_linear, float omega_angular, float &v_left, float &v_right) {
+  v_left = v_linear - (omega_angular * track_width / 2.0);
+  v_right = v_linear + (omega_angular * track_width / 2.0);
+}
+
+/**
+ * Programmatic velocity control API.
+ * This is the main interface for autonomous control modes.
+ * Converts twist command to wheel velocities, runs PI controllers, and applies motor commands.
+ * 
+ * @param v_linear Linear velocity (m/s), positive = forward
+ * @param omega_angular Angular velocity (rad/s), positive = counter-clockwise (left turn)
+ */
+void set_twist(float v_linear, float omega_angular) {
+  // Measure actual time step for accurate integration
+  static unsigned long last_call_millis = 0;
+  unsigned long current_millis = millis();
+  float dt = 0.01; // Default to 10ms if first call
+  
+  if (last_call_millis > 0) {
+    dt = (current_millis - last_call_millis) / 1000.0; // Convert ms to seconds
+    // Sanity check: clamp dt to reasonable range (1-100ms)
+    dt = constrain(dt, 0.001, 0.100);
+  }
+  last_call_millis = current_millis;
+  
+  // Apply differential drive kinematics
+  float v_left_target, v_right_target;
+  diff_drive_kinematics(v_linear, omega_angular, v_left_target, v_right_target);
+  
+  // Get actual velocities from speedometers
+  float v_left_actual = left_speedometer.get_velocity();
+  float v_right_actual = right_speedometer.get_velocity();
+  
+  // Compute voltage commands via PI controllers
+  float v_left_cmd = left_wheel_controller.compute(v_left_target, v_left_actual, dt);
+  float v_right_cmd = right_wheel_controller.compute(v_right_target, v_right_actual, dt);
+  
+  // Convert voltage to PWM
+  float pwm_left = 0.0;
+  float pwm_right = 0.0;
+  
+  if (!isnan(v_bat) && v_bat > 0.1) {
+    pwm_left = v_left_cmd / v_bat;
+    pwm_right = v_right_cmd / v_bat;
+    
+    // Clamp to valid PWM range [-1, 1]
+    pwm_left = constrain(pwm_left, -1.0, 1.0);
+    pwm_right = constrain(pwm_right, -1.0, 1.0);
+  }
+  
+  // Apply motor commands
+  left_motor.go(pwm_left);
+  right_motor.go(pwm_right);
+}
+
 //////////////////////////////////
 // Finite state machine
+
+class CmdVelAutoMode : public Task {
+ public:
+  CmdVelAutoMode() {
+    name = "auto";
+  }
+
+  virtual void begin() override {
+    logf("cmd_vel auto mode begin");
+    // Reset controllers for clean start
+    left_wheel_controller.reset();
+    right_wheel_controller.reset();
+  }
+
+  virtual void execute() override {
+    // Check if we've received a recent cmd_vel message
+    unsigned long time_since_last_cmd = millis() - cmd_vel_last_received_ms;
+    
+    if (cmd_vel_last_received_ms > 0 && time_since_last_cmd < cmd_vel_timeout_ms) {
+      // We have a recent cmd_vel, apply it
+      set_twist(cmd_vel_linear, cmd_vel_angular);
+    } else {
+      // Timeout or no message received yet - MUST send 0 PWM directly
+      left_motor.go(0);
+      right_motor.go(0);
+      // Reset controllers so integral doesn't accumulate during timeout
+      left_wheel_controller.reset();
+      right_wheel_controller.reset();
+      
+      // Log timeout warning once per second
+      static unsigned long last_warning_ms = 0;
+      if (millis() - last_warning_ms > 1000) {
+        if (cmd_vel_last_received_ms > 0) {
+          logf("cmd_vel timeout (%lu ms since last message)", time_since_last_cmd);
+        }
+        last_warning_ms = millis();
+      }
+    }
+  }
+
+  virtual void end() override {
+    logf("cmd_vel auto mode end");
+    // MUST send 0 PWM directly when exiting auto mode
+    left_motor.go(0);
+    right_motor.go(0);
+    left_wheel_controller.reset();
+    right_wheel_controller.reset();
+  }
+
+  virtual void get_display_string(char * buffer, int buffer_size) override {
+    unsigned long time_since_last_cmd = millis() - cmd_vel_last_received_ms;
+    if (cmd_vel_last_received_ms > 0 && time_since_last_cmd < cmd_vel_timeout_ms) {
+      snprintf(buffer, buffer_size, "v%.1f w%.1f", cmd_vel_linear, cmd_vel_angular);
+    } else {
+      snprintf(buffer, buffer_size, "Auto: wait");
+    }
+  }
+
+} cmd_vel_auto_mode;
+
 class HandMode : public Task {
  public:
   HandMode() {
@@ -975,6 +1251,229 @@ class OffMode : public Task {
   }
 
 } off_mode;
+
+/*
+Open-loop characterization mode for Step 1 of speed control implementation.
+Commands fixed voltages (2V, 4V, 6V, 8V, 10V) and logs commanded voltage
+and steady-state velocity to ROS for feedforward model fitting.
+*/
+class OpenLoopCharacterizationMode : public Task {
+ public:
+  // Voltage sequence to test
+  const float test_voltages[5] = {2.0, 4.0, 6.0, 8.0, 10.0};
+  int current_voltage_index = 0;
+  
+  // Timing for settling and measurement
+  unsigned long state_start_time = 0;
+  const unsigned long settle_time_ms = 2000;  // Wait 2s for velocity to stabilize
+  const unsigned long measure_time_ms = 1000; // Measure for 1s at steady state
+  
+  enum State {
+    SETTLING,
+    MEASURING,
+    COMPLETE
+  } state = SETTLING;
+  
+  // Accumulate measurements during MEASURING state
+  float left_velocity_sum = 0;
+  float right_velocity_sum = 0;
+  int measurement_count = 0;
+  
+  OpenLoopCharacterizationMode() {
+    name = "open-loop";
+  }
+
+  virtual void begin() override {
+    logf("Open-loop characterization mode begin");
+    current_voltage_index = 0;
+    state = SETTLING;
+    state_start_time = millis();
+    left_velocity_sum = 0;
+    right_velocity_sum = 0;
+    measurement_count = 0;
+  }
+
+  // Convert voltage command to PWM duty cycle [-1, 1]
+  float voltage_to_pwm(float voltage) {
+    if (isnan(v_bat) || v_bat < 0.1) {
+      logf("ERROR: Invalid battery voltage: %0.2f", v_bat);
+      return 0.0;
+    }
+    float pwm = voltage / v_bat;
+    // Clamp to valid range
+    if (pwm > 1.0) pwm = 1.0;
+    if (pwm < -1.0) pwm = -1.0;
+    return pwm;
+  }
+
+  virtual void execute() override {
+    // Check if we've completed all voltages
+    if (current_voltage_index >= 5) {
+      logf("Open-loop characterization complete!");
+      set_done();
+      return;
+    }
+    
+    float target_voltage = test_voltages[current_voltage_index];
+    float pwm_command = voltage_to_pwm(target_voltage);
+    
+    unsigned long elapsed = millis() - state_start_time;
+    
+    switch (state) {
+      case SETTLING:
+        // Apply voltage command to both motors
+        left_motor.go(pwm_command);
+        right_motor.go(pwm_command);
+        
+        if (elapsed >= settle_time_ms) {
+          logf("Settling complete for %0.1fV, starting measurements", target_voltage);
+          state = MEASURING;
+          state_start_time = millis();
+          left_velocity_sum = 0;
+          right_velocity_sum = 0;
+          measurement_count = 0;
+        }
+        break;
+        
+      case MEASURING:
+        // Continue applying voltage command
+        left_motor.go(pwm_command);
+        right_motor.go(pwm_command);
+        
+        // Accumulate velocity measurements
+        left_velocity_sum += left_speedometer.get_velocity();
+        right_velocity_sum += right_speedometer.get_velocity();
+        measurement_count++;
+        
+        if (elapsed >= measure_time_ms) {
+          // Calculate average velocities
+          float left_velocity_avg = left_velocity_sum / measurement_count;
+          float right_velocity_avg = right_velocity_sum / measurement_count;
+          
+          logf("Voltage: %0.2fV, Left velocity: %0.3f m/s, Right velocity: %0.3f m/s", 
+               target_voltage, left_velocity_avg, right_velocity_avg);
+          
+          // Move to next voltage
+          current_voltage_index++;
+          state = SETTLING;
+          state_start_time = millis();
+        }
+        break;
+        
+      case COMPLETE:
+        // Should not reach here, but stop motors just in case
+        left_motor.go(0);
+        right_motor.go(0);
+        break;
+    }
+  }
+
+  virtual void end() override {
+    logf("Open-loop characterization mode end");
+    left_motor.go(0);
+    right_motor.go(0);
+  }
+
+  virtual void get_display_string(char * buffer, int buffer_size) override {
+    if (current_voltage_index < 5) {
+      snprintf(buffer, buffer_size, "OL: %0.1fV %s", 
+               test_voltages[current_voltage_index],
+               state == SETTLING ? "settling" : "measuring");
+    } else {
+      snprintf(buffer, buffer_size, "OL: Complete");
+    }
+  }
+
+} open_loop_characterization_mode;
+
+/*
+PI Control Test Mode for Step 2 of speed control implementation.
+Tests the PI controller with feedforward by commanding a sequence of velocities
+and logging commanded vs actual velocities to ROS for validation.
+*/
+class PIControlTestMode : public Task {
+ public:
+  // Test sequence: linear velocity commands (m/s)
+  // Format: {v_linear, omega_angular, duration_ms}
+  struct TestCommand {
+    float v_linear;       // m/s
+    float omega_angular;  // rad/s
+    unsigned long duration_ms;
+    const char* description;
+  };
+  
+  const TestCommand test_sequence[8] = {
+    {0.0, 0.0, 2000, "Stopped"},
+    {0.5, 0.0, 5000, "Slow forward"},
+    {1.0, 0.0, 5000, "Fast forward"},
+    {0.5, 0.0, 3000, "Decelerate"},
+    {0.0, 0.0, 2000, "Stop"},
+    {-0.5, 0.0, 3000, "Reverse"},
+    {0.0, 3.0, 3000, "Rotate left"},
+    {0.0, -3.0, 3000, "Rotate right"}
+  };
+  
+  int current_command_index = 0;
+  unsigned long command_start_time = 0;
+  
+  PIControlTestMode() {
+    name = "pi-test";
+  }
+
+  virtual void begin() override {
+    logf("PI Control Test Mode begin");
+    current_command_index = 0;
+    command_start_time = millis();
+    
+    // Reset controllers to clear any accumulated integral
+    left_wheel_controller.reset();
+    right_wheel_controller.reset();
+  }
+
+  virtual void execute() override {
+    // Check if test sequence is complete
+    if (current_command_index >= 8) {
+      logf("PI Control Test complete!");
+      set_twist(0.0, 0.0);  // Stop
+      set_done();
+      return;
+    }
+    
+    const TestCommand& cmd = test_sequence[current_command_index];
+    unsigned long elapsed = millis() - command_start_time;
+    
+    // Execute current command
+    set_twist(cmd.v_linear, cmd.omega_angular);
+    
+    // Log data for analysis (already happening in main loop via ROS)
+    // The Update message includes velocities, PWM commands, battery voltage, etc.
+    
+    // Check if it's time to move to next command
+    if (elapsed >= cmd.duration_ms) {
+      logf("Command complete: %s (v=%0.2f, omega=%0.2f)", 
+           cmd.description, cmd.v_linear, cmd.omega_angular);
+      current_command_index++;
+      command_start_time = millis();
+    }
+  }
+
+  virtual void end() override {
+    logf("PI Control Test Mode end");
+    set_twist(0.0, 0.0);  // Stop motors
+    left_motor.go(0);
+    right_motor.go(0);
+  }
+
+  virtual void get_display_string(char * buffer, int buffer_size) override {
+    if (current_command_index < 8) {
+      const TestCommand& cmd = test_sequence[current_command_index];
+      snprintf(buffer, buffer_size, "PI: %s", cmd.description);
+    } else {
+      snprintf(buffer, buffer_size, "PI: Complete");
+    }
+  }
+
+} pi_control_test_mode;
 
 
 /*
@@ -1095,20 +1594,20 @@ public:
 
 } go_to_can_mode;
 
-class AutoMode : public Task {
+class WaypointFollowingMode : public Task {
  public:
   bool unsticking = false;
   float meters_to_next_waypoint = 0;
   float unstick_left_start_meters = NAN;
   float unstick_right_start_meters = NAN;
 
-  AutoMode() {
-    name = "auto";
+  WaypointFollowingMode() {
+    name = "waypoint-following";
   }
   int step = 0;
 
   void begin() override {
-    logf("auto mode begin");
+    logf("waypoint-following mode begin");
     step = 0;
   }
 
@@ -1158,11 +1657,11 @@ class AutoMode : public Task {
   }
 
   void end() override {
-    Serial.write("auto mode end\n");
+    Serial.write("waypoint-following mode end\n");
     step = 0;
   }
 
-} auto_mode;
+} waypoint_following_mode;
 
 class FailsafeMode : public Task {
  public:
@@ -1179,7 +1678,10 @@ class FailsafeMode : public Task {
 std::vector<Task *> tasks = {
     &hand_mode,
     &off_mode,
-    &auto_mode,
+    &open_loop_characterization_mode,
+    &pi_control_test_mode,
+    &cmd_vel_auto_mode,
+    &waypoint_following_mode,
     &failsafe_mode,
     &calibrate_compass_mode,
     &find_can_mode,
@@ -1197,12 +1699,18 @@ std::vector<Fsm::Edge> edges = {
     Fsm::Edge("auto", "hand", "hand"),
     Fsm::Edge("auto", "rc-moved", "hand"),
     Fsm::Edge("off", "hand", "hand"),
-    Fsm::Edge("hand", "sd-click", "find-can"),
+    // Fsm::Edge("hand", "sd-click", "find-can"),
     Fsm::Edge("find-can", "rc-moved", "hand"),
     Fsm::Edge("find-can", "done", "go-to-can"),
     Fsm::Edge("go-to-can", "done", "hand"),
     Fsm::Edge("go-to-can", "lost-can", "find-can"),
     Fsm::Edge("go-to-can", "rc-moved", "hand"),
+    //Fsm::Edge("hand", "sd-click", "open-loop"),
+    Fsm::Edge("hand", "sd-click", "pi-test"),
+    Fsm::Edge("pi-test", "done", "hand"),
+    Fsm::Edge("pi-test", "rc-moved", "hand"),
+    Fsm::Edge("open-loop", "done", "hand"),
+    Fsm::Edge("open-loop", "rc-moved", "hand"),
     Fsm::Edge("*", "off", "off"),
 };
 
@@ -1234,6 +1742,11 @@ void ros_thread(void *arg) {
       destroy_ros_node_and_publishers();
       rclc_support_fini(&support);
       Serial.printf("rclc_support shut down\n");
+    }
+
+    // spin executor to process subscriptions
+    if (ros_ready) {
+      rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
     }
 
     delay(100); // sleep to allow other tasks to run
@@ -1618,6 +2131,8 @@ void loop() {
     update_msg.left_speed = left_speedometer.get_velocity();
     update_msg.right_speed = right_speedometer.get_velocity();
     update_msg.left_motor_command = left_motor.get_setpoint();
+    update_msg.left_odometer_ticks = left_encoder.odometer_a;
+    update_msg.right_odometer_ticks=right_encoder.odometer_a;
     update_msg.right_motor_command = right_motor.get_setpoint();
     update_msg.rx_esc = crsf_ns::crsf_rc_channel_to_float(rx_esc);
     update_msg.rx_str = crsf_ns::crsf_rc_channel_to_float(rx_str);
