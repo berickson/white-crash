@@ -308,9 +308,6 @@ const float virtual_vbat_floor = 2.0;
 // set by the controller
 float virtual_vbat = virtual_vbat_ceiling;
 
-bool avoid_collisions = false;
-
-
 
 RunStatistics gps_stats("gps");
 RunStatistics log_stats("logf");
@@ -675,7 +672,6 @@ void handle_rc_message(crsf_ns::RcData &rc_data) {
   static bool first_time = true;
   static int message_count = 0;
   static float last_virtual_bat = NAN;
-  static bool last_avoid_collisions = false;
   ++message_count;
 
   if (rc_data.failsafe) {
@@ -697,11 +693,9 @@ void handle_rc_message(crsf_ns::RcData &rc_data) {
 
   // set parameters based on rc input
   virtual_vbat = virtual_vbat_floor + (virtual_vbat_ceiling - virtual_vbat_floor) * p1_knob_percent;
-  avoid_collisions = toggle_a_enabled;
 
   if (first_time) {
     last_virtual_bat = virtual_vbat;
-    last_avoid_collisions = avoid_collisions;
     first_time = false;
   }
 
@@ -711,15 +705,6 @@ void handle_rc_message(crsf_ns::RcData &rc_data) {
     set_temporary_display_string(str);
     last_virtual_bat = virtual_vbat;
   }
-  if (avoid_collisions != last_avoid_collisions) {
-    if (avoid_collisions) {
-      set_temporary_display_string("avoid");
-    } else {
-      set_temporary_display_string("no avoid");
-    }
-    last_avoid_collisions = avoid_collisions;
-  }
-
 
   // log the inputs
   if (false && message_count % 100 == 0) {
@@ -875,32 +860,6 @@ void update_motor_speeds() {
   float speed = crsf_ns::crsf_rc_channel_to_float(rx_esc);
   // str_speed is [-1,1] where negative is left, positive is right
   float str_speed = crsf_ns::crsf_rc_channel_to_float(rx_str);
-
-  // only avoid collisions when moving forward
-  if (avoid_collisions && speed > 0) {
-    // if we are moving forward and the tof is less than 0.9 meters, turn or slow to avoid collions
-    bool collision_ahead = tof_center.distance < 0.9;
-    bool collision_right = tof_right.distance < 0.9;
-    bool collision_left = tof_left.distance < 0.9;
-    float collision_distance = std::min(tof_center.distance, std::min(tof_right.distance, tof_left.distance));
-
-    float left_distance = isnan(tof_left.distance) ? std::numeric_limits<float>::max() : tof_left.distance;
-    float right_distance = isnan(tof_right.distance) ? std::numeric_limits<float>::max() : tof_right.distance;
-
-    // turn or slow to avoid collisions
-    if (collision_right && (right_distance < left_distance)) {
-      str_speed = -0.25;
-    } else if (collision_left && (left_distance < right_distance)) {
-      str_speed = 0.25;
-    } else if (collision_right && collision_left || collision_ahead) {
-      auto max_speed = min(speed, collision_distance  - 0.1f);
-      if (max_speed < 0) {
-        max_speed = 0;
-      }
-      
-      speed = max_speed;
-    } 
-  }
 
   // don't move if speed is too low
   if (abs(speed) < 0.05) {
