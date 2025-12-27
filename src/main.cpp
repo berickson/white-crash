@@ -91,7 +91,7 @@ std::vector<lat_lon> route_waypoints = {
     sidewalk_in_front_of_driveway,
 };
 
-float contest_max_can_distance = 1.0;
+float contest_max_can_distance = 0.9; // about 3 feet
 
 // where we store the compass calibration
 const char *compass_calibration_file_path = "/compass_calibration.txt";
@@ -804,7 +804,7 @@ bool go_toward_lat_lon(lat_lon destination, float * meters_to_next_waypoint) {
 
   // subtract courseTo from 360 to get postive ccw
   double desired_bearing_degrees = 360. - gps.courseTo(gnss_lat, gnss_lon, destination.lat, destination.lon);
-  double current_heading_degrees = compass.get_azimuth_degrees() + compass_mounting_angle_degrees;
+  double current_heading_degrees = compass_heading_degrees; // use bno, it is better                                
 
   double heading_error = desired_bearing_degrees - current_heading_degrees;
   while (heading_error > 180) {
@@ -1673,14 +1673,14 @@ std::vector<Fsm::Edge> edges = {
     Fsm::Edge("auto", "hand", "hand"),
     Fsm::Edge("auto", "rc-moved", "hand"),
     Fsm::Edge("off", "hand", "hand"),
-    // Fsm::Edge("hand", "sd-click", "find-can"),
+    Fsm::Edge("hand", "sd-click", "find-can"),
     Fsm::Edge("find-can", "rc-moved", "hand"),
     Fsm::Edge("find-can", "done", "go-to-can"),
     Fsm::Edge("go-to-can", "done", "hand"),
     Fsm::Edge("go-to-can", "lost-can", "find-can"),
     Fsm::Edge("go-to-can", "rc-moved", "hand"),
     //Fsm::Edge("hand", "sd-click", "open-loop"),
-    Fsm::Edge("hand", "sd-click", "pi-test"),
+    //Fsm::Edge("hand", "sd-click", "pi-test"),
     Fsm::Edge("pi-test", "done", "hand"),
     Fsm::Edge("pi-test", "rc-moved", "hand"),
     Fsm::Edge("open-loop", "done", "hand"),
@@ -2578,7 +2578,7 @@ if (use_gnss && every_minute) {
 
 
     crsf.send_flight_mode(display_string);
-    crsf.send_attitude(0, 0, compass.get_azimuth_degrees());
+    crsf.send_attitude(bno_orientation_degrees.y(), bno_orientation_degrees.y(), compass_heading_degrees);
 
     if (use_gnss) {
       crsf.send_gps(
