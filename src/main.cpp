@@ -1011,14 +1011,59 @@ PIController right_wheel_controller;
 // TODO: Calibrate this value through rotation tests
 const float track_width = 0.20;  // 20cm estimate
 
+// Angular velocity PI control gains
+// Proportional gain - immediate response to error
+const float angle_k_p = 0.5;  // Initial value, tune empirically
+// Integral gain - eliminates steady-state error
+const float angle_k_i = 2.0;  // Initial value, tune empirically
+
+// Angular velocity controller state
+float angular_error_integral = 0.0;
+const float max_angular_integral = 2.0;  // rad - limits integral windup
+
 /**
  * Convert linear and angular velocity to individual wheel velocities.
+ * Includes closed-loop angular velocity control using gyro feedback.
+ * @param v_linear Linear velocity (m/s), positive = forward
+ * @param omega_angular_cmd Commanded angular velocity (rad/s), positive = counter-clockwise
+ * @param omega_angular_measured Measured angular velocity from gyro (rad/s)
+ * @param v_left Output left wheel velocity (m/s)
+ * @param v_right Output right wheel velocity (m/s)
+ */
+void diff_drive_kinematics(float v_linear, float omega_angular_cmd, float omega_angular_measured, float dt, float &v_left, float &v_right) {
+  // Compute angular velocity error
+  float angular_error = omega_angular_cmd - omega_angular_measured;
+  
+  // Reset integral if not commanding motion (prevent drift)
+  if (abs(omega_angular_cmd) < 0.01) {
+    angular_error_integral = 0.0;
+  } else {
+    // Accumulate error for integral term
+    angular_error_integral += angular_error * dt;
+    // Clamp integral to prevent unbounded growth
+    angular_error_integral = constrain(angular_error_integral, -max_angular_integral, max_angular_integral);
+  }
+  
+  // PI correction
+  float angular_correction = angle_k_p * angular_error + angle_k_i * angular_error_integral;
+  
+  // Effective angular velocity includes commanded value plus correction
+  float omega_effective = omega_angular_cmd + angular_correction;
+  
+  // Compute wheel velocities using corrected angular velocity
+  v_left = v_linear - (omega_effective * track_width / 2.0);
+  v_right = v_linear + (omega_effective * track_width / 2.0);
+}
+
+/**
+ * Convert linear and angular velocity to individual wheel velocities.
+ * Open-loop version without feedback (for compatibility).
  * @param v_linear Linear velocity (m/s), positive = forward
  * @param omega_angular Angular velocity (rad/s), positive = counter-clockwise
  * @param v_left Output left wheel velocity (m/s)
  * @param v_right Output right wheel velocity (m/s)
  */
-void diff_drive_kinematics(float v_linear, float omega_angular, float &v_left, float &v_right) {
+void diff_drive_kinematics_open_loop(float v_linear, float omega_angular, float &v_left, float &v_right) {
   v_left = v_linear - (omega_angular * track_width / 2.0);
   v_right = v_linear + (omega_angular * track_width / 2.0);
 }
@@ -1044,9 +1089,14 @@ void set_twist(float v_linear, float omega_angular) {
   }
   last_call_millis = current_millis;
   
-  // Apply differential drive kinematics
+  // Get measured angular velocity from BNO055 gyroscope (Z-axis)
+  // bno_gyro_dps is already being read at 100Hz in the main loop
+  // Convert from deg/s to rad/s
+  float measured_angular_vel = bno_gyro_dps.z() * (M_PI / 180.0);
+  
+  // Apply differential drive kinematics with angular velocity PI feedback
   float v_left_target, v_right_target;
-  diff_drive_kinematics(v_linear, omega_angular, v_left_target, v_right_target);
+  diff_drive_kinematics(v_linear, omega_angular, measured_angular_vel, dt, v_left_target, v_right_target);
   
   // Get actual velocities from speedometers
   float v_left_actual = left_speedometer.get_velocity();
