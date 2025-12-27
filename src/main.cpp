@@ -1143,26 +1143,33 @@ class CmdVelAutoMode : public Task {
   virtual void execute() override {
     // Check if we've received a recent cmd_vel message
     unsigned long time_since_last_cmd = millis() - cmd_vel_last_received_ms;
+    bool have_recent_cmd = cmd_vel_last_received_ms > 0 && time_since_last_cmd < cmd_vel_timeout_ms;
     
-    if (cmd_vel_last_received_ms > 0 && time_since_last_cmd < cmd_vel_timeout_ms) {
+    // Track state transitions for logging
+    static bool was_following_cmd = false;
+    
+    if (have_recent_cmd) {
+      // Log transition from not following to following
+      if (!was_following_cmd) {
+        logf("cmd_vel: now following commands");
+        was_following_cmd = true;
+      }
+      
       // We have a recent cmd_vel, apply it
       set_twist(cmd_vel_linear, cmd_vel_angular);
     } else {
+      // Log transition from following to not following
+      if (was_following_cmd) {
+        logf("cmd_vel: stopped - no recent messages (%lu ms since last)", time_since_last_cmd);
+        was_following_cmd = false;
+      }
+      
       // Timeout or no message received yet - MUST send 0 PWM directly
       left_motor.go(0);
       right_motor.go(0);
       // Reset controllers so integral doesn't accumulate during timeout
       left_wheel_controller.reset();
       right_wheel_controller.reset();
-      
-      // Log timeout warning once per second
-      static unsigned long last_warning_ms = 0;
-      if (millis() - last_warning_ms > 1000) {
-        if (cmd_vel_last_received_ms > 0) {
-          logf("cmd_vel timeout (%lu ms since last message)", time_since_last_cmd);
-        }
-        last_warning_ms = millis();
-      }
     }
   }
 
