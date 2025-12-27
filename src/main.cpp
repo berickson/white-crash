@@ -909,8 +909,8 @@ class PIController {
   const float ff_gain = 2.800;    // V/(m/s)
   
   // PI gains (from Step 1 recommendations)
-  float kp = 0.56;   // V/(m/s) - proportional gain
-  float ki = 2.0;    // V/(m/s²) - integral gain (increased for faster dead zone breakthrough)
+  float k_p = 0.56;   // V/(m/s) - proportional gain
+  float k_i = 20.0;    // V/(m/s²) - integral gain (increased for faster dead zone breakthrough)
   
   // Controller state
   float error_integral = 0.0;  // Accumulated error (m·s)
@@ -962,7 +962,7 @@ class PIController {
     // Clamp integral to prevent unbounded growth
     error_integral = constrain(error_integral, -max_integral, max_integral);
     
-    float v_pi = kp * error + ki * error_integral;
+    float v_pi = k_p * error + k_i * error_integral;
     
     // Total voltage command
     float v_total = v_feedforward + v_pi;
@@ -973,11 +973,11 @@ class PIController {
       v_total = max_voltage;
       // Back-calculate what integral should be at saturation
       float max_pi = v_total - v_feedforward;
-      error_integral = (max_pi - kp * error) / ki;
+      error_integral = (max_pi - k_p * error) / k_i;
     } else if (v_total < min_voltage) {
       v_total = min_voltage;
       float min_pi = v_total - v_feedforward;
-      error_integral = (min_pi - kp * error) / ki;
+      error_integral = (min_pi - k_p * error) / k_i;
     }
     
     return v_total;
@@ -995,8 +995,8 @@ class PIController {
    * Set controller gains (for tuning)
    */
   void set_gains(float p, float i) {
-    kp = p;
-    ki = i;
+    k_p = p;
+    k_i = i;
   }
 };
 
