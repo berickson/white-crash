@@ -69,6 +69,10 @@ class lat_lon {
   double lon;
 };
 
+
+// from https://cdip.ucsd.edu/m/deployment/id/997/?
+float magnetic_declination_degrees = 11.888; // add this to heading to go from magnetic heading to compass heading
+
 lat_lon sidewalk_in_front_of_driveway = {33.802051, -118.123404};
 lat_lon mid1 = {33.8020525,	-118.123365};
 lat_lon mid2 = {33.802054,	-118.123326};
@@ -265,8 +269,11 @@ uint32_t tof_timing_budget_ms = 20;
 
 AK8975Compass compass(Wire, 0x0E);
 Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28, &Wire);
-imu::Vector<3> bno_orientation;
+imu::Vector<3> bno_orientation_degrees;
+float compass_heading_degrees = NAN;
 imu::Vector<3> bno_acceleration;
+imu::Vector<3> bno_mag;
+imu::Vector<3> bno_gyro_dps;
 
 
 QuadratureEncoder left_encoder(pin_left_encoder_a, pin_left_encoder_b, meters_per_odometer_tick);
@@ -436,8 +443,6 @@ void cmd_vel_callback(const void *msgin) {
   cmd_vel_linear = msg->linear.x;
   cmd_vel_angular = msg->angular.z;
   cmd_vel_last_received_ms = millis();
-
-  logf("got a cmd_vel message v: %.2f w: %2f", cmd_vel_linear, cmd_vel_angular);
 }
 
 void error_loop() {
@@ -2162,6 +2167,17 @@ uint8_t estimate_lipo_battery_percent_from_voltage(float v) {
 
 }
 
+// ensure degress [0,360) for d
+float normalize_compass_degrees(float d) {
+  while (d < 0.0) {
+    d += 360.0;
+  }
+  while (d>=360.0) {
+    d -= 360.0;
+  }
+  return d;
+}
+
 void loop() {
 
   delay(1); // give the system a little time to breathe
@@ -2193,12 +2209,18 @@ void loop() {
     update_msg.mag_x = compass.last_reading.x;
     update_msg.mag_y = compass.last_reading.y;
     update_msg.mag_z = compass.last_reading.z;
-    update_msg.yaw = bno_orientation.x();
-    update_msg.pitch = bno_orientation.y();
-    update_msg.roll = bno_orientation.z();
-    update_msg.acceleration_x = bno_acceleration.x();
-    update_msg.acceleration_y = bno_acceleration.y();
-    update_msg.acceleration_z = bno_acceleration.z();
+    update_msg.bno_yaw_degrees = compass_heading_degrees;
+    update_msg.bno_pitch_degrees = bno_orientation_degrees.y();
+    update_msg.bno_roll_degrees = bno_orientation_degrees.z();
+    update_msg.bno_acceleration_x = bno_acceleration.x();
+    update_msg.bno_acceleration_y = bno_acceleration.y();
+    update_msg.bno_acceleration_z = bno_acceleration.z();
+    update_msg.bno_gyro_x = bno_gyro_dps.x();
+    update_msg.bno_gyro_y = bno_gyro_dps.y();
+    update_msg.bno_gyro_z = bno_gyro_dps.z();
+    update_msg.bno_mag_x = bno_mag.x();
+    update_msg.bno_mag_y = bno_mag.y();
+    update_msg.bno_mag_z = bno_mag.z();
 
 
     if (ros_ready) {
@@ -2208,8 +2230,13 @@ void loop() {
   }
 
   if (every_10_ms) {
-    bno_orientation = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
+    bno_orientation_degrees = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
+    // for some reason, bno uses y axis direction for heading, and CW is positive
+    // add 90 degrees to move it to the x axis (our travel direction), and then add magnetic declination
+    compass_heading_degrees = normalize_compass_degrees(bno_orientation_degrees.x() + 90 + magnetic_declination_degrees);
     bno_acceleration = bno.getVector(Adafruit_BNO055::VECTOR_LINEARACCEL);
+    bno_gyro_dps = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
+    bno_mag = bno.getVector(Adafruit_BNO055::VECTOR_MAGNETOMETER);
   }
 
   if (every_1000_ms) {
