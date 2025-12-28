@@ -454,6 +454,11 @@ float cmd_vel_angular = 0.0;
 unsigned long cmd_vel_last_received_ms = 0;
 const unsigned long cmd_vel_timeout_ms = 500;
 
+// Twist control state
+bool twist_control_enabled = false;
+float twist_target_linear = 0.0;
+float twist_target_angular = 0.0;
+
 rclc_support_t support;
 rcl_allocator_t allocator;
 rcl_node_t node;
@@ -1191,14 +1196,56 @@ void diff_drive_kinematics_open_loop(float v_linear, float omega_angular, float 
 }
 
 /**
- * Programmatic velocity control API.
- * This is the main interface for autonomous control modes.
- * Converts twist command to wheel velocities, runs PI controllers, and applies motor commands.
+ * Set twist velocity targets.
+ * Call this from autonomous modes to specify desired linear and angular velocities.
+ * The actual control loop runs separately in the main loop.
  * 
  * @param v_linear Linear velocity (m/s), positive = forward
  * @param omega_angular Angular velocity (rad/s), positive = counter-clockwise (left turn)
  */
-void set_twist(float v_linear, float omega_angular) {
+void set_twist_target(float v_linear, float omega_angular) {
+  twist_target_linear = v_linear;
+  twist_target_angular = omega_angular;
+}
+
+/**
+ * Enable twist control.
+ * Resets PI controllers and sets up for velocity control.
+ * Call this in mode begin() methods.
+ */
+void enable_twist_control() {
+  twist_control_enabled = true;
+  twist_target_linear = 0.0;
+  twist_target_angular = 0.0;
+  left_wheel_controller.reset();
+  right_wheel_controller.reset();
+  angular_error_integral = 0.0;
+}
+
+/**
+ * Disable twist control and stop motors.
+ * Resets all controller state and stops motors safely.
+ * Call this in mode end() methods.
+ */
+void disable_twist_control() {
+  twist_control_enabled = false;
+  twist_target_linear = 0.0;
+  twist_target_angular = 0.0;
+  left_wheel_controller.reset();
+  right_wheel_controller.reset();
+  angular_error_integral = 0.0;
+  // Safety: stop motors
+  left_motor.go(0);
+  right_motor.go(0);
+}
+
+/**
+ * Update twist control loop.
+ * Reads from twist_target_linear and twist_target_angular globals.
+ * Runs PI controllers and applies motor commands.
+ * Called automatically from main loop at 10ms intervals when twist_control_enabled.
+ */
+void update_twist_control() {
   // Measure actual time step for accurate integration
   static unsigned long last_call_millis = 0;
   unsigned long current_millis = millis();
@@ -1218,7 +1265,7 @@ void set_twist(float v_linear, float omega_angular) {
   
   // Apply differential drive kinematics with angular velocity PI feedback
   float v_left_target, v_right_target;
-  diff_drive_kinematics(v_linear, omega_angular, measured_angular_vel, dt, v_left_target, v_right_target);
+  diff_drive_kinematics(twist_target_linear, twist_target_angular, measured_angular_vel, dt, v_left_target, v_right_target);
   
   // Get actual velocities from speedometers
   float v_left_actual = left_speedometer.get_velocity();
@@ -1257,9 +1304,7 @@ class CmdVelAutoMode : public Task {
 
   virtual void begin() override {
     logf("cmd_vel auto mode begin");
-    // Reset controllers for clean start
-    left_wheel_controller.reset();
-    right_wheel_controller.reset();
+    enable_twist_control();
   }
 
   virtual void execute() override {
@@ -1277,8 +1322,8 @@ class CmdVelAutoMode : public Task {
         was_following_cmd = true;
       }
       
-      // We have a recent cmd_vel, apply it
-      set_twist(cmd_vel_linear, cmd_vel_angular);
+      // We have a recent cmd_vel, set the target
+      set_twist_target(cmd_vel_linear, cmd_vel_angular);
     } else {
       // Log transition from following to not following
       if (was_following_cmd) {
@@ -1286,22 +1331,14 @@ class CmdVelAutoMode : public Task {
         was_following_cmd = false;
       }
       
-      // Timeout or no message received yet - MUST send 0 PWM directly
-      left_motor.go(0);
-      right_motor.go(0);
-      // Reset controllers so integral doesn't accumulate during timeout
-      left_wheel_controller.reset();
-      right_wheel_controller.reset();
+      // Timeout - set zero velocity target
+      set_twist_target(0.0, 0.0);
     }
   }
 
   virtual void end() override {
     logf("cmd_vel auto mode end");
-    // MUST send 0 PWM directly when exiting auto mode
-    left_motor.go(0);
-    right_motor.go(0);
-    left_wheel_controller.reset();
-    right_wheel_controller.reset();
+    disable_twist_control();
   }
 
   virtual void get_display_string(char * buffer, int buffer_size) override {
@@ -1578,16 +1615,15 @@ class PIControlTestMode : public Task {
     current_command_index = 0;
     command_start_time = millis();
     
-    // Reset controllers to clear any accumulated integral
-    left_wheel_controller.reset();
-    right_wheel_controller.reset();
+    // Enable twist control (resets controllers automatically)
+    enable_twist_control();
   }
 
   virtual void execute() override {
     // Check if test sequence is complete
     if (current_command_index >= 8) {
       logf("PI Control Test complete!");
-      set_twist(0.0, 0.0);  // Stop
+      set_twist_target(0.0, 0.0);  // Stop
       set_done();
       return;
     }
@@ -1596,7 +1632,7 @@ class PIControlTestMode : public Task {
     unsigned long elapsed = millis() - command_start_time;
     
     // Execute current command
-    set_twist(cmd.v_linear, cmd.omega_angular);
+    set_twist_target(cmd.v_linear, cmd.omega_angular);
     
     // Log data for analysis (already happening in main loop via ROS)
     // The Update message includes velocities, PWM commands, battery voltage, etc.
@@ -1612,9 +1648,7 @@ class PIControlTestMode : public Task {
 
   virtual void end() override {
     logf("PI Control Test Mode end");
-    set_twist(0.0, 0.0);  // Stop motors
-    left_motor.go(0);
-    right_motor.go(0);
+    disable_twist_control();
   }
 
   virtual void get_display_string(char * buffer, int buffer_size) override {
@@ -2735,6 +2769,11 @@ if (use_gnss && every_minute) {
   if (every_10_ms) {
     HangChecker hc("fsm");
     fsm.execute();
+  }
+
+  // Update twist control at 100Hz when enabled
+  if (twist_control_enabled && every_10_ms) {
+    update_twist_control();
   }
 
   // read mode from rx_aux channel
