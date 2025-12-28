@@ -412,6 +412,7 @@ RunStatistics crsf_stats("crsf");
 RunStatistics compass_stats("compass");
 RunStatistics telemetry_stats("telemetry");
 RunStatistics serial_read_stats("serial_read");
+RunStatistics rc_callback_stats("rc_callback");
 RunStatistics crsf_parse_stats("crsf_parse");
 RunStatistics tof_stats("tof");
 RunStatistics tof_distance_stats("tof_distance");
@@ -677,7 +678,7 @@ void setup_micro_ros_wifi() {
 
   Serial.printf("Found wifi network %s, connecting to %s\n", connection_info->ssid, connection_info->ssid);
 
-  delay(5000); // wait for serial monitor to connect
+  // delay(5000); // wait for serial monitor to connect
   Serial.printf("setting up micro ros\n");
 
 	WiFi.begin(connection_info->ssid, connection_info->password);
@@ -2447,7 +2448,7 @@ void loop() {
   // Feed watchdog timer - must be first line to prevent watchdog reset
   esp_task_wdt_reset();
   
-  delay(1); // give the system a little time to breathe
+  // delay(1); // give the system a little time to breathe
   
   // Track last successful loop time in RTC memory
   diag.last_loop_ms = millis();
@@ -2531,12 +2532,12 @@ void loop() {
 
   // tof distance
   if (every_n_ms(last_loop_time_ms, loop_time_ms, tof_timing_budget_ms)) {
+    BlockTimer bt(tof_distance_stats);
     for (auto tof : tof_sensors) {
       // extra block to limit scope of BlockTimer
       {
         {
           auto sensor = tof->sensor;
-          BlockTimer bt(tof_distance_stats);
 
           auto start = millis();
           if (sensor->read(true)) {
@@ -2710,7 +2711,7 @@ if (use_gnss && every_minute) {
   }
   
   if (enable_stats_logging && every_minute) {
-    for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, crsf_parse_stats, tof_distance_stats}) {
+    for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, crsf_parse_stats, tof_distance_stats, rc_callback_stats}) {
       stats.to_log_msg(&log_msg);
       log(log_msg);
     }

@@ -272,22 +272,28 @@ class Crsf {
   void update() {
     serial_read_stats.start();
     int available = crsf_serial.available();
+
+
     // read until buffer is empty
-    if (available > 300) {
-      logf("CRSF buffer overflow, bytes count in buffer:%d \n", available);
-      while(crsf_serial.read() != -1){
-      }
-      logf("CRSF buffer overflow, buffer cleared, buffer has %d bytes \n", crsf_serial.available());
-      serial_read_stats.stop();
-      return;
-    }
+    // if (available > 300) {
+    //   logf("CRSF buffer overflow, bytes count in buffer:%d \n", available);
+    //   while(crsf_serial.read() != -1){
+    //   }
+    //   logf("CRSF buffer overflow, buffer cleared, buffer has %d bytes \n", crsf_serial.available());
+    //   serial_read_stats.stop();
+    //   return;
+    // }
     serial_read_stats.stop();
     while (available) {
       serial_read_stats.start();
-      uint8_t c = crsf_serial.read();
+      // bke: I measured this and reading multiple bytes is MUCH faster than reading one at a time
+      uint8_t buffer[640];
+      size_t bytes_read = crsf_serial.readBytes(buffer, min(available, (int)sizeof(buffer)));
       serial_read_stats.stop();
       crsf_parse_stats.start();
-      process_crsf_byte(c);
+      for (size_t i = 0; i < bytes_read; i++) {
+          process_crsf_byte(buffer[i]);
+      }
       crsf_parse_stats.stop();
       serial_read_stats.start();
       available = crsf_serial.available();
@@ -295,11 +301,13 @@ class Crsf {
     }
 
     if (rc_data.failsafe == false && millis() - last_rc_packet_time > 1000) {
+      rc_callback_stats.start();
       rc_data.failsafe = true;
       memset(rc_data.channels, 0, sizeof(rc_data.channels));
       if (rc_callback) {
         rc_callback(rc_data);
       }
+      rc_callback_stats.stop();
     }
   }
 
