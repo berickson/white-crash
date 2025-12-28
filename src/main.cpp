@@ -22,6 +22,7 @@
 // Watchdog and diagnostics
 #include <esp_task_wdt.h>
 #include <esp_system.h>  // for esp_reset_reason()
+#include <esp_core_dump.h>> // for esp_core_dump_init()
 #include <Preferences.h>  // for flash storage of diagnostics
 
 // micro ros
@@ -416,6 +417,7 @@ RunStatistics rc_callback_stats("rc_callback");
 RunStatistics crsf_parse_stats("crsf_parse");
 RunStatistics tof_stats("tof");
 RunStatistics tof_distance_stats("tof_distance");
+RunStatistics bno_stats("bno");
 
 StuckChecker left_stuck_checker;
 StuckChecker right_stuck_checker;
@@ -1680,17 +1682,15 @@ public:
     // randomly turn left or right at every attempt
     bool rotate_left = ((millis() % 2) == 1);
 
+
     logf("find can mode begin (rotating %s)", rotate_left ? "left" : "right");
 
+    enable_twist_control();
 
-    if (rotate_left) {
-      left_motor.go(-1 * rotate_throttle);
-      right_motor.go(rotate_throttle);
-    } else {
-      logf("rotating right");
-      left_motor.go(rotate_throttle);
-      right_motor.go(-1 * rotate_throttle);
-    }
+    float rotation_radians_per_second = rotate_left ? 2.0 : -2.0;
+    float velocity = 0.0;
+
+    set_twist_target(velocity, rotation_radians_per_second);
 
   }
 
@@ -1707,17 +1707,29 @@ public:
   }
 
   void end() override {
+
+    disable_twist_control();
+    
     left_motor.go(0);
     right_motor.go(0);
     logf("find-can mode complete");
   }
 } find_can_mode;
 
+float velocity_for_stop_distance(float distance, float accel) {
+  return sqrt(2 * fabs(distance) * fabs(accel));
+}
+
+
 class GoToCanMode : public Task {
 public:
-  const float goal_distance = 0.15;
-  const float throttle = 0.2;
+  const float goal_distance = 0.05;
   float last_seen_millis = 0;
+  float max_approach_velocity = 2.0;
+  float max_angular_velocity = 0.5;
+  float max_accel = 2.5;
+  float last_ms = millis();
+  float last_v = 0.0;
 
   GoToCanMode() {
     name = "go-to-can";
@@ -1726,6 +1738,10 @@ public:
   void begin() override {
     last_seen_millis = millis();
     logf("go-to-can mode begin");
+    enable_twist_control();
+    last_ms = millis();
+    last_v = 0.0;
+
   }
 
   void execute() override {
@@ -1750,6 +1766,12 @@ public:
     const uint32_t can_lost_timout_ms = 2000;
 
 
+    float stop_velocity = velocity_for_stop_distance(min_distance-goal_distance, max_accel);
+
+    float accel_velocity = last_v + (millis() - last_ms) / 1000.0f * max_accel;
+
+    float approach_velocity = std::min<float>({stop_velocity, accel_velocity, max_approach_velocity});
+
     // if any distance is close enough, we are done
     if (min_distance <= goal_distance ) {
       set_done();
@@ -1759,21 +1781,18 @@ public:
         set_done("lost-can");
     } else if (center_distance == min_distance) {
       // if center is the min distance, go there
-      left_motor.go(throttle);
-      right_motor.go(throttle);
+      set_twist_target( approach_velocity, 0);
     } else if (right_distance == min_distance) {
-      // if right is the min distance, go there
-      right_motor.go(throttle / steering_ratio);
-      left_motor.go(throttle * steering_ratio);
+      set_twist_target( approach_velocity, -max_angular_integral);
     } else {
       // left distance must be the min, go there
-      right_motor.go(throttle * steering_ratio);
-      left_motor.go(throttle / steering_ratio);
+      set_twist_target( approach_velocity, max_angular_integral);
     }
 
   }
 
   void end() override {
+    disable_twist_control();
     left_motor.go(0);
     right_motor.go(0);
     logf("go-to-can mode complete");
@@ -2224,6 +2243,7 @@ void setup() {
   // Using RTC_NOINIT_ATTR preserves diagnostic data even with panic=true
   esp_task_wdt_init(3, true);  // 3 seconds, panic on timeout
   esp_task_wdt_add(NULL);      // Add current task to watchdog
+  esp_core_dump_init(); // enable core dump
   Serial.printf("[%lu ms] Watchdog timer configured (3 second timeout)\n", millis());
 
 #ifdef pin_built_in_led
@@ -2288,6 +2308,7 @@ void setup() {
 
   Serial.printf("[%lu ms] Initializing I2C\n", millis());
   Wire.setPins(pin_sda, pin_scl);
+  Wire.setClock(400000);
   Wire.begin();
   Wire.setTimeOut(5); // ms
   Serial.printf("[%lu ms] I2C initialized\n", millis());
@@ -2409,7 +2430,7 @@ void setup() {
         NULL,
         1,
         NULL,
-        1);
+        1); // this is the same core as loop. TBD: move to core zero?
   }
   Serial.printf("[%lu ms] ROS thread created\n", millis());
 
@@ -2535,6 +2556,7 @@ void loop() {
   }
 
   if (every_10_ms) {
+    BlockTimer bt(bno_stats);
     bno_orientation_degrees = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
     // for some reason, bno uses y axis direction for heading, and CW is positive
     // add 90 degrees to move it to the x axis (our travel direction), and then add magnetic declination
@@ -2574,7 +2596,7 @@ void loop() {
           auto sensor = tof->sensor;
 
           auto start = millis();
-          if (sensor->read(true)) {
+          if (sensor->read(false)) {
             if (sensor->ranging_data.range_status == VL53L1X::RangeValid) {
               tof->distance = sensor->ranging_data.range_mm / 1000.0;
     
@@ -2745,7 +2767,7 @@ if (use_gnss && every_minute) {
   }
   
   if (enable_stats_logging && every_minute) {
-    for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, crsf_parse_stats, tof_distance_stats, rc_callback_stats}) {
+    for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, crsf_parse_stats, tof_distance_stats, rc_callback_stats, bno_stats}) {
       stats.to_log_msg(&log_msg);
       log(log_msg);
     }
