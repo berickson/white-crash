@@ -19,6 +19,11 @@
 
 #include "driver/uart.h" // to clear the serial buffer
 
+// Watchdog and diagnostics
+#include <esp_task_wdt.h>
+#include <esp_system.h>  // for esp_reset_reason()
+#include <Preferences.h>  // for flash storage of diagnostics
+
 // micro ros
 #include <micro_ros_platformio.h>
 #include <rcl/rcl.h>
@@ -38,6 +43,89 @@
 #include "RunStatistics.h"
 #include "StuckChecker.h"
 #include "secrets/wifi_login.h"
+
+//////////////////////////////////
+// Diagnostic State Tracking (RTC Memory)
+
+// RTC memory survives watchdog resets but not power cycles
+// Fast SRAM with unlimited write endurance - safe to update every loop
+// RTC_NOINIT_ATTR preserves data even across panic/abort resets
+RTC_NOINIT_ATTR struct DiagnosticState {
+  uint32_t magic;
+  uint32_t boot_count;
+  uint32_t last_loop_ms;
+  uint32_t consecutive_wdt_resets;
+  char last_location[40];
+  esp_reset_reason_t last_reset;
+} diag;
+
+const uint32_t DIAG_MAGIC = 0xC0FFEE42;
+
+Preferences diagnostics_prefs;
+
+// Save diagnostics to flash storage (survives power cycles)
+void save_diagnostics_to_flash() {
+  diagnostics_prefs.begin("white_crash", false);  // Read-write mode
+  diagnostics_prefs.putUInt("magic", diag.magic);
+  diagnostics_prefs.putUInt("boot_count", diag.boot_count);
+  diagnostics_prefs.putUInt("wdt_resets", diag.consecutive_wdt_resets);
+  diagnostics_prefs.putString("last_loc", diag.last_location);
+  diagnostics_prefs.putUInt("last_reset", static_cast<uint32_t>(diag.last_reset));
+  diagnostics_prefs.end();
+}
+
+// Load diagnostics from flash storage (for reporting after power cycle)
+void load_diagnostics_from_flash() {
+  diagnostics_prefs.begin("white_crash", true);  // Read-only mode
+  if (diagnostics_prefs.isKey("magic")) {
+    uint32_t flash_magic = diagnostics_prefs.getUInt("magic", 0);
+    if (flash_magic == DIAG_MAGIC) {
+      uint32_t crash_boot_count = diagnostics_prefs.getUInt("boot_count", 0);
+      uint32_t wdt_resets = diagnostics_prefs.getUInt("wdt_resets", 0);
+      
+      // Sanity check: crash boot count should be <= current boot count
+      // If not, flash data is stale/corrupted - clear it
+      if (crash_boot_count > diag.boot_count || crash_boot_count == 0) {
+        Serial.println("\n=== STALE/INVALID CRASH DATA IN FLASH ===");
+        Serial.printf("Flash boot count (%lu) > current (%lu) - clearing flash data\n", 
+                      crash_boot_count, diag.boot_count);
+        Serial.println("=== FLASH DATA CLEARED ===\n");
+        diagnostics_prefs.end();
+        
+        // Clear the stale data
+        diagnostics_prefs.begin("white_crash", false);  // Read-write mode
+        diagnostics_prefs.clear();
+        diagnostics_prefs.end();
+        return;
+      }
+      
+      // Only show if there were actual crashes (not just power_on initialization)
+      if (wdt_resets > 0) {
+        uint32_t boots_since_crash = diag.boot_count - crash_boot_count;
+        
+        Serial.println("\n=== PREVIOUS CRASH DATA FROM FLASH ===");
+        Serial.printf("Crash occurred %lu boot(s) ago (boot #%lu, current boot #%lu)\n", 
+                      boots_since_crash, crash_boot_count, diag.boot_count);
+        Serial.printf("Consecutive WDT resets: %u\n", wdt_resets);
+        Serial.printf("Last location: %s\n", diagnostics_prefs.getString("last_loc", "unknown").c_str());
+        uint32_t reset_reason = diagnostics_prefs.getUInt("last_reset", 0);
+        Serial.printf("Last reset reason: ");
+        switch(static_cast<esp_reset_reason_t>(reset_reason)) {
+          case ESP_RST_POWERON:   Serial.println("Power-on"); break;
+          case ESP_RST_SW:        Serial.println("Software reset"); break;
+          case ESP_RST_PANIC:     Serial.println("Exception/panic"); break;
+          case ESP_RST_INT_WDT:   Serial.println("Interrupt watchdog"); break;
+          case ESP_RST_TASK_WDT:  Serial.println("TASK WATCHDOG TIMEOUT"); break;
+          case ESP_RST_WDT:       Serial.println("Other watchdog"); break;
+          case ESP_RST_BROWNOUT:  Serial.println("Brownout"); break;
+          default:                Serial.printf("Unknown (%u)\n", reset_reason); break;
+        }
+        Serial.println("=== END CRASH DATA ===");
+      }
+    }
+  }
+  diagnostics_prefs.end();
+}
 
 class Severity {
   public: enum SeverityLevel {
@@ -294,6 +382,7 @@ float p2_knob_percent = NAN;
 double v_bat = NAN;
 
 bool ros_ready = false;
+bool crash_data_published_to_ros = false;
 
 char temporary_display_string[16] = {0};
 unsigned long temporary_display_string_set_ms = 0;
@@ -435,6 +524,38 @@ void logf(const char *format, ...) {
   rosout_msg.level = Severity::INFO;
   log(log_msg);
   log_rosout(rosout_msg);
+}
+
+// Publish crash diagnostics to ROS (called after ROS connection established)
+void publish_crash_data_to_ros() {
+  diagnostics_prefs.begin("white_crash", true);  // Read-only mode
+  if (diagnostics_prefs.isKey("magic")) {
+    uint32_t flash_magic = diagnostics_prefs.getUInt("magic", 0);
+    if (flash_magic == DIAG_MAGIC) {
+      uint32_t wdt_resets = diagnostics_prefs.getUInt("wdt_resets", 0);
+      uint32_t crash_boot_count = diagnostics_prefs.getUInt("boot_count", 0);
+      
+      // Sanity check: ignore stale/invalid data
+      if (crash_boot_count > diag.boot_count || crash_boot_count == 0 || wdt_resets == 0) {
+        diagnostics_prefs.end();
+        return;
+      }
+      
+      uint32_t boots_since_crash = diag.boot_count - crash_boot_count;
+      String last_loc = diagnostics_prefs.getString("last_loc", "unknown");
+      
+      if (boots_since_crash == 0) {
+        // Fresh crash from this boot session
+        logf(Severity::WARN, "*** crash detected: System hung at '%s' (%u consecutive WDT resets) ***", 
+             last_loc.c_str(), wdt_resets);
+      } else {
+        // Stale crash from previous boot(s)
+        logf(Severity::INFO, "*** old crash data: System hung at '%s' %lu boot(s) ago (%u consecutive WDT resets) ***", 
+             last_loc.c_str(), boots_since_crash, wdt_resets);
+      }
+    }
+  }
+  diagnostics_prefs.end();
 }
 
 // cmd_vel subscription callback
@@ -1760,6 +1881,12 @@ void ros_thread(void *arg) {
         create_ros_node_and_publishers();    
         ros_ready = true;
         logf("Connected to micro-ROS agent");
+        
+        // Publish crash data once after connecting to ROS
+        if (!crash_data_published_to_ros) {
+          publish_crash_data_to_ros();
+          crash_data_published_to_ros = true;
+        }
       } else {
         delay(1000);
       }
@@ -1976,21 +2103,98 @@ void gnss_init_thread(void *parameter) {
   vTaskDelete(NULL);
 }
 
+//////////////////////////////////
+// Diagnostic Initialization
+
+void init_diagnostics() {
+  esp_reset_reason_t reason = esp_reset_reason();
+  
+  Serial.println("\n\n=== WHITE CRASH BOOT ===");
+  
+  // Initialize or increment boot count FIRST (before loading flash data)
+  if (diag.magic == DIAG_MAGIC) {
+    diag.boot_count++;
+  } else {
+    // First boot ever - initialize
+    diag.magic = DIAG_MAGIC;
+    diag.boot_count = 1;
+    diag.consecutive_wdt_resets = 0;
+    strncpy(diag.last_location, "power_on", sizeof(diag.last_location));
+  }
+  
+  Serial.printf("Boot #%lu\n", diag.boot_count);
+  
+  // On power-on reset, check if we have crash data in flash from previous power cycle
+  if (reason == ESP_RST_POWERON) {
+    load_diagnostics_from_flash();
+  }
+  
+  // Print reset reason
+  Serial.printf("Reset reason: ");
+  switch(reason) {
+    case ESP_RST_POWERON:   Serial.println("Power-on"); break;
+    case ESP_RST_SW:        Serial.println("Software reset"); break;
+    case ESP_RST_PANIC:     Serial.println("Exception/panic"); break;
+    case ESP_RST_INT_WDT:   Serial.println("Interrupt watchdog"); break;
+    case ESP_RST_TASK_WDT:  Serial.println("TASK WATCHDOG TIMEOUT"); break;
+    case ESP_RST_WDT:       Serial.println("Other watchdog"); break;
+    case ESP_RST_BROWNOUT:  Serial.println("Brownout"); break;
+    default:                Serial.printf("Unknown (%d)\n", reason); break;
+  }
+  
+  if (reason == ESP_RST_TASK_WDT || reason == ESP_RST_INT_WDT) {
+    diag.consecutive_wdt_resets++;
+    Serial.printf("\n*** WATCHDOG RESET #%lu ***\n", diag.consecutive_wdt_resets);
+    Serial.printf("*** SYSTEM HUNG AT: %s ***\n\n", diag.last_location);
+    
+    // Save crash data to flash so it survives power cycles
+    save_diagnostics_to_flash();
+    Serial.println("Crash data saved to flash\n");
+    
+    // Take action after repeated hangs at same location
+    if (diag.consecutive_wdt_resets > 3) {
+      Serial.printf("\n!!! REPEATED HANGS AT %s !!!\n", diag.last_location);
+      Serial.println("!!! CONSIDER DISABLING THIS SENSOR !!!\n");
+    }
+  } else {
+    diag.consecutive_wdt_resets = 0;
+  }
+  
+  diag.last_reset = reason;
+  Serial.println("=== BOOT COMPLETE ===\n");
+}
+
 
 //////////////////////////////////
 // Main setup and loop
 
 void setup() {
 
+  // ensure power is turned off for all the tof sensors
+  for (auto pin : {pin_left_tof_power, pin_center_tof_power, pin_right_tof_power}) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+  }
+
+
+  // Initialize serial first so diagnostics can print
+  Serial.begin(3000000);
+  // note: it takes about 1.8 seconds after boot for serial messages to show in platformio
+  delay(2000);  // Wait for serial to be ready
+
+  // Initialize diagnostics and print boot information
+  init_diagnostics();
+
+  // Configure hardware watchdog timer (3 second timeout)
+  // Using RTC_NOINIT_ATTR preserves diagnostic data even with panic=true
+  esp_task_wdt_init(3, true);  // 3 seconds, panic on timeout
+  esp_task_wdt_add(NULL);      // Add current task to watchdog
+  Serial.printf("[%lu ms] Watchdog timer configured (3 second timeout)\n", millis());
 
 #ifdef pin_built_in_led
   pinMode(pin_built_in_led, OUTPUT);
   digitalWrite(pin_built_in_led, HIGH);
 #endif
-  Serial.begin(3000000);
-
-  // note: it takes about 1.8 sconds after boot for serial messages to show in platformio
-  delay(2000);  // Wait for serial to be ready
   Serial.printf("[%lu ms] Setup starting\n", millis());
 
 
@@ -2190,6 +2394,10 @@ class HangChecker {
     this->name = name;
     this->timeout_ms = timeout_ms;
     this->start_ms = millis();
+    
+    // Track location in diagnostic state (RTC SRAM - fast & unlimited writes)
+    strncpy(diag.last_location, name, sizeof(diag.last_location) - 1);
+    diag.last_location[sizeof(diag.last_location) - 1] = '\0';
   }
 
   ~HangChecker() {
@@ -2236,8 +2444,13 @@ float normalize_compass_degrees(float d) {
 }
 
 void loop() {
-
+  // Feed watchdog timer - must be first line to prevent watchdog reset
+  esp_task_wdt_reset();
+  
   delay(1); // give the system a little time to breathe
+  
+  // Track last successful loop time in RTC memory
+  diag.last_loop_ms = millis();
   BlockTimer bt(loop_stats);
   last_loop_time_ms = loop_time_ms;
   loop_time_ms = millis();
@@ -2300,7 +2513,7 @@ void loop() {
     static bool calibration_achieved = false;
     uint8_t system, gyro, accel, mag;
     bno.getCalibration(&system, &gyro, &accel, &mag);
-    Serial.printf("Bno Calibration status sytem: %d gyro %d accel: %d mag: %d\n", system, gyro, accel, mag);
+//    Serial.printf("Bno Calibration status sytem: %d gyro %d accel: %d mag: %d\n", system, gyro, accel, mag);
 
     // save calibration constants once we are fully calibrated
     if (!calibration_achieved && system == 3 && gyro == 3 && accel == 3 && mag == 3) {
@@ -2364,11 +2577,21 @@ void loop() {
 
   if (use_gps && every_10_ms) {
     BlockTimer bt(gps_stats);
-    HangChecker hc("gps");
-    while (gnss_serial.available()) {
+    HangChecker hc("gps_serial");
+    
+    // Limit iterations to prevent infinite loop
+    int char_count = 0;
+    const int MAX_GPS_CHARS = 100;
+    
+    while (char_count < MAX_GPS_CHARS && gnss_serial.available()) {
       auto c = gnss_serial.read();
       gps.encode(c);
       Serial.write(c);
+      char_count++;
+    }
+    
+    if (char_count >= MAX_GPS_CHARS) {
+      logf(Severity::WARN, "GPS: max chars (%d) processed, may have more buffered", char_count);
     }
   }
 
@@ -2463,6 +2686,7 @@ if (use_gnss && every_minute) {
 
   if (every_100_ms) {
     HangChecker hc("encoders");
+    // if (millis()>30000) delay(10000); // fake hang
     // logf("Encoders left: %fm (%d,%d) right: %fm (%d,%d) ms: %d, %d",
     //     left_encoder.get_meters(),
     //     left_encoder.odometer_a,
