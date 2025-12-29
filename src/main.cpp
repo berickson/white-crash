@@ -22,7 +22,7 @@
 // Watchdog and diagnostics
 #include <esp_task_wdt.h>
 #include <esp_system.h>  // for esp_reset_reason()
-#include <esp_core_dump.h>> // for esp_core_dump_init()
+#include <esp_core_dump.h> // for esp_core_dump_init()
 #include <Preferences.h>  // for flash storage of diagnostics
 
 // micro ros
@@ -385,6 +385,9 @@ double v_bat = NAN;
 bool ros_ready = false;
 bool crash_data_published_to_ros = false;
 
+// Mutex for protecting sensor data shared between i2c_sensor_thread and main loop
+SemaphoreHandle_t sensor_data_mutex = NULL;
+
 char temporary_display_string[16] = {0};
 unsigned long temporary_display_string_set_ms = 0;
 const unsigned long temporary_display_string_timeout_ms = 1000;
@@ -418,6 +421,7 @@ RunStatistics crsf_parse_stats("crsf_parse");
 RunStatistics tof_stats("tof");
 RunStatistics tof_distance_stats("tof_distance");
 RunStatistics bno_stats("bno");
+RunStatistics i2c_thread_stats("i2c_thread");
 
 StuckChecker left_stuck_checker;
 StuckChecker right_stuck_checker;
@@ -429,6 +433,16 @@ float nan_to_max(float v) {
   return isnan(v) ? std::numeric_limits<float>::max() : v;
 }
 
+// ensure degress [0,360) for d
+float normalize_compass_degrees(float d) {
+  while (d < 0.0) {
+    d += 360.0;
+  }
+  while (d>=360.0) {
+    d -= 360.0;
+  }
+  return d;
+}
 
 //////////////////////////////////
 // Micro Ros
@@ -933,7 +947,12 @@ bool go_toward_lat_lon(lat_lon destination, float * meters_to_next_waypoint) {
 
   // subtract courseTo from 360 to get postive ccw
   double desired_bearing_degrees = 360. - gps.courseTo(gnss_lat, gnss_lon, destination.lat, destination.lon);
-  double current_heading_degrees = compass_heading_degrees; // use bno, it is better                                
+  
+  // Read compass heading with mutex protection
+  double current_heading_degrees;
+  xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
+  current_heading_degrees = compass_heading_degrees; // use bno, it is better
+  xSemaphoreGive(sensor_data_mutex);
 
   double heading_error = desired_bearing_degrees - current_heading_degrees;
   while (heading_error > 180) {
@@ -1261,9 +1280,12 @@ void update_twist_control() {
   last_call_millis = current_millis;
   
   // Get measured angular velocity from BNO055 gyroscope (Z-axis)
-  // bno_gyro_dps is already being read at 100Hz in the main loop
+  // bno_gyro_dps is now read in i2c_sensor_thread - read with mutex protection
   // Convert from deg/s to rad/s
-  float measured_angular_vel = bno_gyro_dps.z() * (M_PI / 180.0);
+  float measured_angular_vel;
+  xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
+  measured_angular_vel = bno_gyro_dps.z() * (M_PI / 180.0);
+  xSemaphoreGive(sensor_data_mutex);
   
   // Apply differential drive kinematics with angular velocity PI feedback
   float v_left_target, v_right_target;
@@ -1695,8 +1717,15 @@ public:
   }
 
   void execute() override {
+    // Read TOF distances with mutex protection
+    float tof_left_dist, tof_center_dist, tof_right_dist;
+    xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
+    tof_left_dist = tof_left.distance;
+    tof_center_dist = tof_center.distance;
+    tof_right_dist = tof_right.distance;
+    xSemaphoreGive(sensor_data_mutex);
 
-    float distance = std::min({nan_to_max(tof_left.distance), nan_to_max(tof_center.distance), nan_to_max(tof_right.distance)});
+    float distance = std::min({nan_to_max(tof_left_dist), nan_to_max(tof_center_dist), nan_to_max(tof_right_dist)});
     // turn left
     logf("distance: %.2f", distance);
 
@@ -1745,11 +1774,14 @@ public:
   }
 
   void execute() override {
-
-
-    float right_distance = nan_to_max(tof_right.distance);
-    float left_distance = nan_to_max(tof_left.distance);
-    float center_distance = nan_to_max(tof_center.distance);
+    // Read TOF distances with mutex protection
+    float right_distance, left_distance, center_distance;
+    xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
+    right_distance = nan_to_max(tof_right.distance);
+    left_distance = nan_to_max(tof_left.distance);
+    center_distance = nan_to_max(tof_center.distance);
+    xSemaphoreGive(sensor_data_mutex);
+    
     uint32_t time_since_seen;
 
     float min_distance = std::min({center_distance, left_distance, right_distance});
@@ -1921,6 +1953,101 @@ std::vector<Fsm::Edge> edges = {
 };
 
 Fsm fsm(tasks, edges);
+
+void i2c_sensor_thread(void *arg) {
+  // Register this task with watchdog
+  esp_task_wdt_add(NULL);
+  
+  Serial.printf("[%lu ms] I2C sensor thread started on core %d\n", millis(), xPortGetCoreID());
+  
+  unsigned long last_tof_ms = 0;
+  unsigned long last_bno_ms = 0;
+  unsigned long last_compass_ms = 0;
+  int tof_sensor_index = 0;
+  
+  while (true) {
+    // Small delay to yield to other tasks, 
+    // put before time so it doesn't count
+    // against our stats
+    delay(1);
+
+    BlockTimer bt(i2c_thread_stats);  // Measure full thread iteration
+    
+    // Feed watchdog
+    esp_task_wdt_reset();
+    
+    unsigned long now = millis();
+    
+    // TOF sensors - staggered reads
+    // Read one sensor every ~7ms to spread I2C load
+    if (now - last_tof_ms >= 7) {
+      BlockTimer bt(tof_stats);  // Measure TOF I2C operation time
+      
+      if (tof_sensor_index < tof_sensors.size()) {
+        auto tof = tof_sensors[tof_sensor_index];
+        auto sensor = tof->sensor;
+        
+        // Read from I2C (no mutex needed for Wire)
+        if (sensor->read(false)) {
+          float new_distance;
+          if (sensor->ranging_data.range_status == VL53L1X::RangeValid) {
+            new_distance = sensor->ranging_data.range_mm / 1000.0;
+          } else {
+            new_distance = std::numeric_limits<float>::quiet_NaN();
+          }
+          
+          // Quick mutex-protected write
+          xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
+          tof->distance = new_distance;
+          xSemaphoreGive(sensor_data_mutex);
+        }
+        
+        tof_sensor_index++;
+        if (tof_sensor_index >= tof_sensors.size()) {
+          tof_sensor_index = 0;
+        }
+      }
+      last_tof_ms += 7;  // Fixed interval to prevent drift
+    }
+    
+    // BNO055 - read every 10ms
+    if (now - last_bno_ms >= 10) {
+      BlockTimer bt(bno_stats);  // Measure BNO055 I2C operation time
+      
+      // Read from I2C (no mutex needed for Wire)
+      imu::Vector<3> orientation = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
+      imu::Vector<3> accel = bno.getVector(Adafruit_BNO055::VECTOR_LINEARACCEL);
+      imu::Vector<3> gyro = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
+      imu::Vector<3> mag = bno.getVector(Adafruit_BNO055::VECTOR_MAGNETOMETER);
+      float heading = normalize_compass_degrees(orientation.x() + 90 + magnetic_declination_degrees);
+      
+      // Quick mutex-protected write of all BNO data
+      xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
+      bno_orientation_degrees = orientation;
+      bno_acceleration = accel;
+      bno_gyro_dps = gyro;
+      bno_mag = mag;
+      compass_heading_degrees = heading;
+      xSemaphoreGive(sensor_data_mutex);
+      
+      last_bno_ms += 10;  // Fixed interval to prevent drift
+    }
+    
+    // Compass - read every 100ms
+    if (now - last_compass_ms >= 100) {
+      BlockTimer bt(compass_stats);  // Measure compass I2C operation time
+      
+      // Read from I2C (no mutex needed for Wire)
+      // compass.update() modifies compass.last_reading directly
+      // Note: compass.last_reading is a simple struct of 3 ints - reads/writes are atomic enough
+      // for our purposes (worst case: one corrupted sample every 100ms during race condition)
+      compass.update();
+      
+      last_compass_ms += 100;  // Fixed interval to prevent drift
+    }
+    
+  }
+}
 
 void ros_thread(void *arg) {
   // setup_micro_ros_wifi will hang if it can't connect towifi
@@ -2313,6 +2440,15 @@ void setup() {
   Wire.setTimeOut(5); // ms
   Serial.printf("[%lu ms] I2C initialized\n", millis());
 
+  // Initialize sensor data mutex
+  Serial.printf("[%lu ms] Creating sensor data mutex\n", millis());
+  sensor_data_mutex = xSemaphoreCreateMutex();
+  if (sensor_data_mutex == NULL) {
+    Serial.println("ERROR: Failed to create sensor_data_mutex");
+    while(1);
+  }
+  Serial.printf("[%lu ms] Sensor data mutex created\n", millis());
+
 
   Serial.printf("Starting BNO055\n");
   if(!bno.begin())
@@ -2420,6 +2556,18 @@ void setup() {
   adcAttachPin(pin_battery_voltage);
   Serial.printf("[%lu ms] ADC configured\n", millis());
 
+  // create I2C sensor thread on Core 0
+  Serial.printf("[%lu ms] Creating I2C sensor thread\n", millis());
+  xTaskCreatePinnedToCore(
+      i2c_sensor_thread,
+      "i2c_sensors",
+      8192,
+      NULL,
+      1,
+      NULL,
+      0); // Core 0 - separate from main loop
+  Serial.printf("[%lu ms] I2C sensor thread created\n", millis());
+
   // create a thread for ros stuff
   Serial.printf("[%lu ms] Creating ROS thread\n", millis());
   if(true) {
@@ -2488,22 +2636,13 @@ uint8_t estimate_lipo_battery_percent_from_voltage(float v) {
 
 }
 
-// ensure degress [0,360) for d
-float normalize_compass_degrees(float d) {
-  while (d < 0.0) {
-    d += 360.0;
-  }
-  while (d>=360.0) {
-    d -= 360.0;
-  }
-  return d;
-}
+
 
 void loop() {
   // Feed watchdog timer - must be first line to prevent watchdog reset
   esp_task_wdt_reset();
   
-  // delay(1); // give the system a little time to breathe
+  delay(1); // give the system a little time to breathe
   
   // Track last successful loop time in RTC memory
   diag.last_loop_ms = millis();
@@ -2531,6 +2670,10 @@ void loop() {
     update_msg.right_motor_command = right_motor.get_setpoint();
     update_msg.rx_esc = crsf_ns::crsf_rc_channel_to_float(rx_esc);
     update_msg.rx_str = crsf_ns::crsf_rc_channel_to_float(rx_str);
+    
+    // Read compass and BNO data with mutex protection (compass.last_reading written in i2c_sensor_thread)
+    xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
+    // Compute azimuth from cached compass reading instead of calling get_azimuth_degrees() which might do I2C
     update_msg.yaw_degrees = compass.get_azimuth_degrees();
     update_msg.mag_x = compass.last_reading.x;
     update_msg.mag_y = compass.last_reading.y;
@@ -2547,6 +2690,7 @@ void loop() {
     update_msg.bno_mag_x = bno_mag.x();
     update_msg.bno_mag_y = bno_mag.y();
     update_msg.bno_mag_z = bno_mag.z();
+    xSemaphoreGive(sensor_data_mutex);
 
 
     if (ros_ready) {
@@ -2555,17 +2699,7 @@ void loop() {
     }
   }
 
-  if (every_10_ms) {
-    BlockTimer bt(bno_stats);
-    bno_orientation_degrees = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
-    // for some reason, bno uses y axis direction for heading, and CW is positive
-    // add 90 degrees to move it to the x axis (our travel direction), and then add magnetic declination
-    compass_heading_degrees = normalize_compass_degrees(bno_orientation_degrees.x() + 90 + magnetic_declination_degrees);
-    bno_acceleration = bno.getVector(Adafruit_BNO055::VECTOR_LINEARACCEL);
-    bno_gyro_dps = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
-    bno_mag = bno.getVector(Adafruit_BNO055::VECTOR_MAGNETOMETER);
-  }
-
+  // BNO055 calibration check (I2C reads moved to i2c_sensor_thread)
   if (every_1000_ms) {
     static bool calibration_achieved = false;
     uint8_t system, gyro, accel, mag;
@@ -2584,44 +2718,30 @@ void loop() {
     }
   }
 
-
-
-  // tof distance
+  // TOF distance reading (moved to i2c_sensor_thread, ROS publishing still in main loop)
   if (every_n_ms(last_loop_time_ms, loop_time_ms, tof_timing_budget_ms)) {
-    BlockTimer bt(tof_distance_stats);
+    BlockTimer bt(tof_distance_stats);  // Measure TOF publishing time
     for (auto tof : tof_sensors) {
-      // extra block to limit scope of BlockTimer
+      if (ros_ready)
       {
-        {
-          auto sensor = tof->sensor;
-
-          auto start = millis();
-          if (sensor->read(false)) {
-            if (sensor->ranging_data.range_status == VL53L1X::RangeValid) {
-              tof->distance = sensor->ranging_data.range_mm / 1000.0;
-    
-            } else {
-              // printf("VL53L1X %s distance status: %d\n", tof->name, sensor->ranging_data.range_status);
-              tof->distance = std::numeric_limits<float>::quiet_NaN();
-            }      
-          }
-        }
-        if (ros_ready)
-        {
-          set_stamp(tof_distance_msg.header.stamp);
-
-          tof_distance_msg.range = tof->distance;
-          if (tof_distance_msg.radiation_type != sensor_msgs__msg__Range__INFRARED) {
-            logf( 
-              Severity::ERROR, 
-              "tof_distance_msg.radiation_type != sensor_msgs__msg__Range__INFRARED, value: %d", 
-              tof_distance_msg.radiation_type);
-            
-            tof_distance_msg.radiation_type = sensor_msgs__msg__Range__INFRARED;
-          }    
-          RCSOFTCHECK(rcl_publish(&(tof->publisher), &tof_distance_msg, NULL));
+        // Read TOF distance with mutex protection
+        float tof_distance;
+        xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
+        tof_distance = tof->distance;
+        xSemaphoreGive(sensor_data_mutex);
+        
+        set_stamp(tof_distance_msg.header.stamp);
+        tof_distance_msg.range = tof_distance;
+        if (tof_distance_msg.radiation_type != sensor_msgs__msg__Range__INFRARED) {
+          logf( 
+            Severity::ERROR, 
+            "tof_distance_msg.radiation_type != sensor_msgs__msg__Range__INFRARED, value: %d", 
+            tof_distance_msg.radiation_type);
+          
+          tof_distance_msg.radiation_type = sensor_msgs__msg__Range__INFRARED;
         }    
-      }
+        RCSOFTCHECK(rcl_publish(&(tof->publisher), &tof_distance_msg, NULL));
+      }    
     }
   }
 
@@ -2767,7 +2887,7 @@ if (use_gnss && every_minute) {
   }
   
   if (enable_stats_logging && every_minute) {
-    for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, crsf_parse_stats, tof_distance_stats, rc_callback_stats, bno_stats}) {
+    for (auto stats : {gps_stats, log_stats, loop_stats, crsf_stats, compass_stats, telemetry_stats, serial_read_stats, crsf_parse_stats, tof_distance_stats, rc_callback_stats, bno_stats, tof_stats, i2c_thread_stats}) {
       stats.to_log_msg(&log_msg);
       log(log_msg);
     }
@@ -2882,11 +3002,8 @@ if (use_gnss && every_minute) {
     last_rx_esc = rx_esc;
   }
 
-  if (every_100_ms) {
-    BlockTimer bt(compass_stats);
-    HangChecker hc("compass");
-    compass.update();
-  }
+  // Compass reading moved to i2c_sensor_thread (every 100ms)
+  // compass.update() now called in i2c_sensor_thread
 
   // blink for a few ms every second to show signs of life
 #ifdef pin_built_in_led

@@ -211,7 +211,9 @@ class Crsf {
       rc_data.channels[15] = rc_channels->channel_16;
 
       if (rc_callback) {
+        rc_callback_stats.start();
         rc_callback(rc_data);
+        rc_callback_stats.stop();
       }
       last_rc_packet_time = millis();
     } else if (frame_type == CRSF_FRAMETYPE_LINK_STATISTICS) {
