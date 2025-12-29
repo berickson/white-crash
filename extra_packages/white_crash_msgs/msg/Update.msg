@@ -23,3 +23,9 @@ float32 bno_gyro_z
 float32 bno_mag_x
 float32 bno_mag_y
 float32 bno_mag_z
+float32 twist_target_linear         # Commanded linear velocity (m/s) - NAN if not in twist control
+float32 twist_target_angular        # Commanded angular velocity (rad/s) - NAN if not in twist control
+float32 twist_target_accel_linear   # Commanded linear acceleration (m/s²) - NAN if not in twist control
+float32 twist_target_accel_angular  # Commanded angular acceleration (rad/s²) - NAN if not in twist control
+float32 v_left_target               # Commanded left wheel velocity (m/s) - NAN if not in twist control
+float32 v_right_target              # Commanded right wheel velocity (m/s) - NAN if not in twist control

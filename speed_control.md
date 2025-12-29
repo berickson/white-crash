@@ -93,10 +93,12 @@ The user shouldn't have to tune PIDs manually.
 
 Update [Update.msg](extra_packages/white_crash_msgs/msg/Update.msg) to add:
 ```
-float32 twist_target_linear     # Commanded linear velocity (m/s)
-float32 twist_target_angular    # Commanded angular velocity (rad/s)
-float32 v_left_target           # Commanded left wheel velocity (m/s)
-float32 v_right_target          # Commanded right wheel velocity (m/s)
+float32 twist_target_linear         # Commanded linear velocity (m/s)
+float32 twist_target_angular        # Commanded angular velocity (rad/s)
+float32 twist_target_accel_linear   # Commanded linear acceleration (m/s²)
+float32 twist_target_accel_angular  # Commanded angular acceleration (rad/s²)
+float32 v_left_target               # Commanded left wheel velocity (m/s)
+float32 v_right_target              # Commanded right wheel velocity (m/s)
 ```
 
 Tasks:
@@ -104,7 +106,7 @@ Tasks:
 - Update main loop publishing code to populate new fields:
   - When `twist_control_enabled == true`: set to actual target values
   - When `twist_control_enabled == false`: set to `NAN` (not in twist control mode)
-- Update [scripts/monitor_pi_control.py](scripts/monitor_pi_control.py) to display tracking error
+- Update [scripts/monitor_pi_control.py](scripts/monitor_pi_control.py) to display tracking error and acceleration
 - Run PIControlTestMode on racks to validate current performance
 
 **Phase 3B: Acceleration Feedforward**

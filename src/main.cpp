@@ -474,6 +474,8 @@ const unsigned long cmd_vel_timeout_ms = 500;
 bool twist_control_enabled = false;
 float twist_target_linear = 0.0;
 float twist_target_angular = 0.0;
+float twist_target_accel_linear = 0.0;
+float twist_target_accel_angular = 0.0;
 
 rclc_support_t support;
 rcl_allocator_t allocator;
@@ -2692,6 +2694,26 @@ void loop() {
     update_msg.bno_mag_z = bno_mag.z();
     xSemaphoreGive(sensor_data_mutex);
 
+    // Populate twist control targets (NAN if not in twist control mode)
+    if (twist_control_enabled) {
+      update_msg.twist_target_linear = twist_target_linear;
+      update_msg.twist_target_angular = twist_target_angular;
+      update_msg.twist_target_accel_linear = twist_target_accel_linear;
+      update_msg.twist_target_accel_angular = twist_target_accel_angular;
+      
+      // Compute v_left_target and v_right_target from kinematics
+      float v_left_for_log, v_right_for_log;
+      diff_drive_kinematics_open_loop(twist_target_linear, twist_target_angular, v_left_for_log, v_right_for_log);
+      update_msg.v_left_target = v_left_for_log;
+      update_msg.v_right_target = v_right_for_log;
+    } else {
+      update_msg.twist_target_linear = NAN;
+      update_msg.twist_target_angular = NAN;
+      update_msg.twist_target_accel_linear = NAN;
+      update_msg.twist_target_accel_angular = NAN;
+      update_msg.v_left_target = NAN;
+      update_msg.v_right_target = NAN;
+    }
 
     if (ros_ready) {
       // publish update message

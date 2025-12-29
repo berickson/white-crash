@@ -61,6 +61,10 @@ class PIControlMonitor(Node):
             'left_actual_velocity': [],
             'right_target_velocity': [],
             'right_actual_velocity': [],
+            'linear_target': [],
+            'angular_target': [],
+            'linear_accel': [],
+            'angular_accel': [],
             'left_pwm': [],
             'right_pwm': [],
             'battery_voltage': []
@@ -88,15 +92,18 @@ class PIControlMonitor(Node):
         if self.collecting:
             current_time = time.time() - self.start_time
             
-            # Calculate voltage commands from PWM
-            left_voltage = msg.left_motor_command * msg.battery_voltage
-            right_voltage = msg.right_motor_command * msg.battery_voltage
-            
-            # Estimate target velocity from voltage command (inverse of feedforward)
-            # This is approximate - actual target depends on PI correction too
-            # But gives us a rough sense of commanded velocity
-            left_target_v = self.voltage_to_velocity(left_voltage)
-            right_target_v = self.voltage_to_velocity(right_voltage)
+            # Use actual commanded velocities from Update message if available (not NAN)
+            # Otherwise fall back to estimating from voltage/PWM
+            import math
+            if not math.isnan(msg.v_left_target):
+                left_target_v = msg.v_left_target
+                right_target_v = msg.v_right_target
+            else:
+                # Fall back to voltage-based estimation (for non-twist-control modes)
+                left_voltage = msg.left_motor_command * msg.battery_voltage
+                right_voltage = msg.right_motor_command * msg.battery_voltage
+                left_target_v = self.voltage_to_velocity(left_voltage)
+                right_target_v = self.voltage_to_velocity(right_voltage)
             
             # Store data
             self.data['timestamp'].append(current_time)
@@ -104,6 +111,10 @@ class PIControlMonitor(Node):
             self.data['left_actual_velocity'].append(msg.left_speed)
             self.data['right_target_velocity'].append(right_target_v)
             self.data['right_actual_velocity'].append(msg.right_speed)
+            self.data['linear_target'].append(msg.twist_target_linear if not math.isnan(msg.twist_target_linear) else 0.0)
+            self.data['angular_target'].append(msg.twist_target_angular if not math.isnan(msg.twist_target_angular) else 0.0)
+            self.data['linear_accel'].append(msg.twist_target_accel_linear if not math.isnan(msg.twist_target_accel_linear) else 0.0)
+            self.data['angular_accel'].append(msg.twist_target_accel_angular if not math.isnan(msg.twist_target_accel_angular) else 0.0)
             self.data['left_pwm'].append(msg.left_motor_command)
             self.data['right_pwm'].append(msg.right_motor_command)
             self.data['battery_voltage'].append(msg.battery_voltage)
@@ -119,11 +130,16 @@ class PIControlMonitor(Node):
                 left_error_pct = (abs(left_error) / max(abs(left_target_v), 0.01)) * 100
                 right_error_pct = (abs(right_error) / max(abs(right_target_v), 0.01)) * 100
                 
+                # Show linear/angular targets and accelerations if in twist control mode
+                twist_info = ""
+                if not math.isnan(msg.twist_target_linear):
+                    twist_info = f" | Twist: v={msg.twist_target_linear:+.3f} ω={msg.twist_target_angular:+.3f} a_v={msg.twist_target_accel_linear:+.3f} a_ω={msg.twist_target_accel_angular:+.3f}"
+                
                 self.get_logger().info(
                     f"t={current_time:5.1f}s | "
                     f"L: tgt={left_target_v:+.3f} act={msg.left_speed:+.3f} err={left_error:+.3f} ({left_error_pct:.1f}%) | "
                     f"R: tgt={right_target_v:+.3f} act={msg.right_speed:+.3f} err={right_error:+.3f} ({right_error_pct:.1f}%) | "
-                    f"V_bat={msg.battery_voltage:.2f}V"
+                    f"V_bat={msg.battery_voltage:.2f}V{twist_info}"
                 )
     
     def trigger_pi_test_mode(self):
