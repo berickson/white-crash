@@ -109,7 +109,49 @@ Tasks:
 - Update [scripts/monitor_pi_control.py](scripts/monitor_pi_control.py) to display tracking error and acceleration
 - Run PIControlTestMode on racks to validate current performance
 
-**Phase 3B: Acceleration Feedforward**
+**Phase 3B: Acceleration Feedforward** ✅ COMPLETE
+
+**Implementation Summary:**
+- Added `ff_accel` parameter to PIController class (initial value 0.7 V/(m/s²))
+- Added global acceleration limits: `max_linear_accel = 1.0 m/s²`, `max_angular_accel = 2.0 rad/s²`
+- Updated `set_twist_target()` signature to accept optional acceleration parameters:
+  ```cpp
+  void set_twist_target(float v_linear, float omega_angular, 
+                        float accel_linear = 0.0, 
+                        float accel_angular = 0.0)
+  ```
+- Implemented ramping logic in `update_twist_control()`:
+  - When `accel == 0.0`: applies internal ramping at configured max acceleration
+  - When `accel != 0.0`: uses explicit acceleration for feedforward
+  - Ramping applied separately for linear and angular velocities
+- Added acceleration feedforward to voltage calculation:
+  ```cpp
+  v_total = v_ff + ff_accel*accel + v_pi
+  ```
+- Added global variables for logging actual ramped/effective values:
+  - `twist_effective_linear/angular` - post-ramping velocities
+  - `twist_effective_accel_linear/angular` - actual accelerations applied
+  - `v_left_target_effective/v_right_target_effective` - wheel targets after kinematics
+- Updated ROS message publishing to log effective values
+
+**Files Modified:**
+- [src/main.cpp](src/main.cpp): PIController, twist control API, update_twist_control(), logging
+- All changes maintain backward compatibility - existing code works with default `accel=0.0`
+
+**Use Cases Now Supported:**
+- **External commands (ROS `cmd_vel`):** Automatic smooth ramping at 1.0 m/s²
+- **Smart position control:** Can specify explicit acceleration for better tracking
+- **Existing code:** Works unchanged with automatic smoothing
+
+**Next Steps:**
+- Build and test basic operation with new acceleration feedforward
+- Proceed to Phase 3C for acceleration tuning tests
+
+**✅ READY FOR TESTING**
+
+---
+
+**Phase 3B: Acceleration Feedforward (OLD - REPLACED)**
 
 **API Design:**
 ```cpp

@@ -477,6 +477,18 @@ float twist_target_angular = 0.0;
 float twist_target_accel_linear = 0.0;
 float twist_target_accel_angular = 0.0;
 
+// Internal ramping state (reset when control disabled to prevent windup)
+float twist_ramped_linear = 0.0;
+float twist_ramped_angular = 0.0;
+
+// Actual ramped/effective values after internal ramping (for logging)
+float twist_effective_linear = 0.0;
+float twist_effective_angular = 0.0;
+float twist_effective_accel_linear = 0.0;
+float twist_effective_accel_angular = 0.0;
+float v_left_target_effective = 0.0;
+float v_right_target_effective = 0.0;
+
 rclc_support_t support;
 rcl_allocator_t allocator;
 rcl_node_t node;
@@ -1058,6 +1070,9 @@ class PIController {
   const float ff_offset = 0.271;  // Volts
   const float ff_gain = 2.800;    // V/(m/s)
   
+  // Acceleration feedforward gain (Phase 3B)
+  float ff_accel = 0.7;  // V/(m/s²) - initial estimate, will tune in Phase 3C
+  
   // PI gains (from Step 1 recommendations)
   float k_p = 0.56;   // V/(m/s) - proportional gain
   float k_i = 20.0;    // V/(m/s²) - integral gain (increased for faster dead zone breakthrough)
@@ -1079,9 +1094,10 @@ class PIController {
    * @param v_target Target velocity (m/s)
    * @param v_actual Actual velocity from speedometer (m/s)
    * @param dt Time step (seconds)
+   * @param accel_target Expected acceleration (m/s²) for feedforward, default 0.0
    * @return Voltage command (Volts)
    */
-  float compute(float v_target, float v_actual, float dt) {
+  float compute(float v_target, float v_actual, float dt, float accel_target = 0.0) {
     // Reset integral if target changes sign (forward ↔ reverse)
     // This prevents accumulated error from one direction affecting the other
     float current_target_sign = (v_target > 0.01) ? 1.0 : ((v_target < -0.01) ? -1.0 : 0.0);
@@ -1114,8 +1130,11 @@ class PIController {
     
     float v_pi = k_p * error + k_i * error_integral;
     
+    // Acceleration feedforward term
+    float v_accel = ff_accel * accel_target;
+    
     // Total voltage command
-    float v_total = v_feedforward + v_pi;
+    float v_total = v_feedforward + v_accel + v_pi;
     
     // Anti-windup: back-calculate integral if output saturates
     // This prevents integral from growing while output is clamped
@@ -1148,11 +1167,22 @@ class PIController {
     k_p = p;
     k_i = i;
   }
+  
+  /**
+   * Set acceleration feedforward gain (for tuning)
+   */
+  void set_accel_gain(float accel_ff) {
+    ff_accel = accel_ff;
+  }
 };
 
 // Instantiate PI controllers for left and right wheels
 PIController left_wheel_controller;
 PIController right_wheel_controller;
+
+// Acceleration limits for internal ramping (Phase 3B)
+const float max_linear_accel = 1.0;  // m/s² - maximum linear acceleration
+const float max_angular_accel = 2.0; // rad/s² - maximum angular acceleration
 
 //////////////////////////////////
 // Differential Drive Kinematics
@@ -1219,16 +1249,24 @@ void diff_drive_kinematics_open_loop(float v_linear, float omega_angular, float 
 }
 
 /**
- * Set twist velocity targets.
+ * Set twist velocity targets with optional acceleration specification.
  * Call this from autonomous modes to specify desired linear and angular velocities.
  * The actual control loop runs separately in the main loop.
  * 
  * @param v_linear Linear velocity (m/s), positive = forward
  * @param omega_angular Angular velocity (rad/s), positive = counter-clockwise (left turn)
+ * @param accel_linear Expected linear acceleration (m/s²):
+ *                     - 0.0 = no explicit intent, apply internal ramping (default)
+ *                     - Non-zero = explicit acceleration for feedforward
+ * @param accel_angular Expected angular acceleration (rad/s²), similar behavior
  */
-void set_twist_target(float v_linear, float omega_angular) {
+void set_twist_target(float v_linear, float omega_angular, 
+                      float accel_linear = 0.0, 
+                      float accel_angular = 0.0) {
   twist_target_linear = v_linear;
   twist_target_angular = omega_angular;
+  twist_target_accel_linear = accel_linear;
+  twist_target_accel_angular = accel_angular;
 }
 
 /**
@@ -1240,6 +1278,11 @@ void enable_twist_control() {
   twist_control_enabled = true;
   twist_target_linear = 0.0;
   twist_target_angular = 0.0;
+  twist_target_accel_linear = 0.0;
+  twist_target_accel_angular = 0.0;
+  // Reset ramped state to prevent windup from previous session
+  twist_ramped_linear = 0.0;
+  twist_ramped_angular = 0.0;
   left_wheel_controller.reset();
   right_wheel_controller.reset();
   angular_error_integral = 0.0;
@@ -1254,6 +1297,11 @@ void disable_twist_control() {
   twist_control_enabled = false;
   twist_target_linear = 0.0;
   twist_target_angular = 0.0;
+  twist_target_accel_linear = 0.0;
+  twist_target_accel_angular = 0.0;
+  // Reset ramped state to prevent windup when re-enabled
+  twist_ramped_linear = 0.0;
+  twist_ramped_angular = 0.0;
   left_wheel_controller.reset();
   right_wheel_controller.reset();
   angular_error_integral = 0.0;
@@ -1269,6 +1317,18 @@ void disable_twist_control() {
  * Called automatically from main loop at 10ms intervals when twist_control_enabled.
  */
 void update_twist_control() {
+  // Deadband: if targets are near zero, just stop motors and don't run control
+  // This prevents small movements from sensor noise when no command is given
+  const float target_deadband = 0.01; // 0.01 m/s or 0.01 rad/s
+  if (abs(twist_target_linear) < target_deadband && abs(twist_target_angular) < target_deadband) {
+    left_motor.go(0);
+    right_motor.go(0);
+    // Also reset ramped state to prevent jump when command arrives
+    twist_ramped_linear = 0.0;
+    twist_ramped_angular = 0.0;
+    return;
+  }
+  
   // Measure actual time step for accurate integration
   static unsigned long last_call_millis = 0;
   unsigned long current_millis = millis();
@@ -1281,6 +1341,49 @@ void update_twist_control() {
   }
   last_call_millis = current_millis;
   
+  // Apply ramping if acceleration not explicitly specified
+  // Use global ramped state (reset when control disabled)
+  float effective_linear_accel = twist_target_accel_linear;
+  float effective_angular_accel = twist_target_accel_angular;
+  
+  // Linear velocity ramping
+  if (twist_target_accel_linear == 0.0) {
+    // No explicit acceleration - apply internal ramping
+    float linear_error = twist_target_linear - twist_ramped_linear;
+    float max_change = max_linear_accel * dt;
+    
+    if (abs(linear_error) <= max_change) {
+      twist_ramped_linear = twist_target_linear;
+      effective_linear_accel = linear_error / dt;  // Actual acceleration applied
+    } else {
+      twist_ramped_linear += (linear_error > 0) ? max_change : -max_change;
+      effective_linear_accel = (linear_error > 0) ? max_linear_accel : -max_linear_accel;
+    }
+  } else {
+    // Explicit acceleration specified - use directly
+    twist_ramped_linear = twist_target_linear;
+    effective_linear_accel = twist_target_accel_linear;
+  }
+  
+  // Angular velocity ramping
+  if (twist_target_accel_angular == 0.0) {
+    // No explicit acceleration - apply internal ramping
+    float angular_error = twist_target_angular - twist_ramped_angular;
+    float max_change = max_angular_accel * dt;
+    
+    if (abs(angular_error) <= max_change) {
+      twist_ramped_angular = twist_target_angular;
+      effective_angular_accel = angular_error / dt;  // Actual acceleration applied
+    } else {
+      twist_ramped_angular += (angular_error > 0) ? max_change : -max_change;
+      effective_angular_accel = (angular_error > 0) ? max_angular_accel : -max_angular_accel;
+    }
+  } else {
+    // Explicit acceleration specified - use directly
+    twist_ramped_angular = twist_target_angular;
+    effective_angular_accel = twist_target_accel_angular;
+  }
+  
   // Get measured angular velocity from BNO055 gyroscope (Z-axis)
   // bno_gyro_dps is now read in i2c_sensor_thread - read with mutex protection
   // Convert from deg/s to rad/s
@@ -1290,16 +1393,30 @@ void update_twist_control() {
   xSemaphoreGive(sensor_data_mutex);
   
   // Apply differential drive kinematics with angular velocity PI feedback
+  // Use ramped targets for smooth motion
   float v_left_target, v_right_target;
-  diff_drive_kinematics(twist_target_linear, twist_target_angular, measured_angular_vel, dt, v_left_target, v_right_target);
+  diff_drive_kinematics(twist_ramped_linear, twist_ramped_angular, measured_angular_vel, dt, v_left_target, v_right_target);
+  
+  // Export effective values for logging
+  twist_effective_linear = twist_ramped_linear;
+  twist_effective_angular = twist_ramped_angular;
+  twist_effective_accel_linear = effective_linear_accel;
+  twist_effective_accel_angular = effective_angular_accel;
+  v_left_target_effective = v_left_target;
+  v_right_target_effective = v_right_target;
   
   // Get actual velocities from speedometers
   float v_left_actual = left_speedometer.get_velocity();
   float v_right_actual = right_speedometer.get_velocity();
   
-  // Compute voltage commands via PI controllers
-  float v_left_cmd = left_wheel_controller.compute(v_left_target, v_left_actual, dt);
-  float v_right_cmd = right_wheel_controller.compute(v_right_target, v_right_actual, dt);
+  // Compute linear accelerations for each wheel from differential drive
+  // accel_left/right ≈ effective_linear_accel ± (effective_angular_accel * track_width / 2)
+  float accel_left = effective_linear_accel - (effective_angular_accel * track_width / 2.0);
+  float accel_right = effective_linear_accel + (effective_angular_accel * track_width / 2.0);
+  
+  // Compute voltage commands via PI controllers with acceleration feedforward
+  float v_left_cmd = left_wheel_controller.compute(v_left_target, v_left_actual, dt, accel_left);
+  float v_right_cmd = right_wheel_controller.compute(v_right_target, v_right_actual, dt, accel_right);
   
   // Convert voltage to PWM
   float pwm_left = 0.0;
@@ -2701,11 +2818,9 @@ void loop() {
       update_msg.twist_target_accel_linear = twist_target_accel_linear;
       update_msg.twist_target_accel_angular = twist_target_accel_angular;
       
-      // Compute v_left_target and v_right_target from kinematics
-      float v_left_for_log, v_right_for_log;
-      diff_drive_kinematics_open_loop(twist_target_linear, twist_target_angular, v_left_for_log, v_right_for_log);
-      update_msg.v_left_target = v_left_for_log;
-      update_msg.v_right_target = v_right_for_log;
+      // Use the effective (ramped) targets that were actually sent to the controllers
+      update_msg.v_left_target = v_left_target_effective;
+      update_msg.v_right_target = v_right_target_effective;
     } else {
       update_msg.twist_target_linear = NAN;
       update_msg.twist_target_angular = NAN;
