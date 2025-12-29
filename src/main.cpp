@@ -1068,14 +1068,14 @@ class PIController {
   // Feedforward model parameters (from Step 1 characterization)
   // V_ff(v) = ff_offset + ff_gain * v
   const float ff_offset = 0.271;  // Volts
-  const float ff_gain = 2.800;    // V/(m/s)
+  const float ff_gain = 1.800;    // V/(m/s)
   
   // Acceleration feedforward gain (Phase 3B)
-  float ff_accel = 0.7;  // V/(m/s²) - initial estimate, will tune in Phase 3C
+  float ff_accel = 0.4;  // V/(m/s²) - reduced significantly, was causing overshoot during acceleration
   
-  // PI gains (from Step 1 recommendations)
-  float k_p = 0.56;   // V/(m/s) - proportional gain
-  float k_i = 20.0;    // V/(m/s²) - integral gain (increased for faster dead zone breakthrough)
+  // PI gains (tuned from tracking data)
+  float k_p = 4.0;   // V/(m/s) - HIGH for aggressive braking during deceleration
+  float k_i = 3.0;    // V/(m/s²) - disabled to prevent oscillations
   
   // Controller state
   float error_integral = 0.0;  // Accumulated error (m·s)
@@ -1932,12 +1932,12 @@ public:
         set_done("lost-can");
     } else if (center_distance == min_distance) {
       // if center is the min distance, go there
-      set_twist_target( approach_velocity, 0);
+      set_twist_target( approach_velocity, 0, max_accel);
     } else if (right_distance == min_distance) {
-      set_twist_target( approach_velocity, -max_angular_integral);
+      set_twist_target( approach_velocity, -max_angular_integral, max_accel);
     } else {
       // left distance must be the min, go there
-      set_twist_target( approach_velocity, max_angular_integral);
+      set_twist_target( approach_velocity, max_angular_integral, max_accel);
     }
 
   }
