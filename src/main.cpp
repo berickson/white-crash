@@ -190,116 +190,39 @@ const char *bno055_calibration_file_path = "/bno055_calibration.txt";
 // pin assignments
 
 
-// Live ESP32 Mini Kit 32
-// see https://doc.riot-os.org/group__boards__esp32__mh-et-live-minikit.html
-
-// pins broken out on the board
-
-/*
-const int pin_built_in_led = 2; // ok
-const int pin_clk_dont_use = 6;
-const int pin_cmd_dont_use = 11;
-const int pin_gpio_0_dont_use = 0;
-// const int pin_gpio_2 = 2;
-const int pin_gpio_4 = 4;
-const int pin_gpio_5 = 5;
-// const int pin_gpio_12 = 12;
-const int pin_gpio_16 = 16;
-const int pin_gpio_17 = 17;
-const int pin_gpio_18 = 18;
-const int pin_gpio_19 = 19;
-const int pin_gpio_21 = 21;
-const int pin_gpio_22 = 22;
-const int pin_gpio_23 = 23;
-const int pin_gpio_25 = 25;
-const int pin_gpio_26 = 26;
-const int pin_gpio_27 = 27;
-const int pin_gpio_32 = 32;
-const int pin_gpio_33 = 33;
-const int pin_gpio_34_input_only = 34;
-const int pin_gpio_35_input_only = 35;
-const int pin_rx_dont_use = 3; // used for USB serial
-const int pin_sd0_dont_use = 7;  // reboots the board if used
-const int pin_sd1_dont_use = 8;  
-const int pin_sd2_dont_use = 9;  // reboots the board if used
-const int pin_sd3_dont_use = 10; // probably bad to use, could interfere with boot, could be used as output after boot if careful
-const int pin_svn_input_only = 39; // GPIO 39 (SVN) for analog input
-const int pin_svp_input_only = 36; // GPIO 36 (SVP) for analog input
-const int pin_tck = 13; // ok (used for JTAG)
-const int pin_tdi_output_only = 12; // ok (used for JTAG)
-const int pin_tdo = 15; // ok (used for JTAG)
-const int pin_tms = 14; // ok (used for JTAG) // connecting to GPIO 14 (TMS) is not recommended as it can interfere with the ESP32's boot process.
-const int pin_tx_dont_use = 1; // used for USB serial
-
-// pins mapping / connections
-
-const int pin_sda = pin_gpio_4; // yellow
-const int pin_scl = pin_gpio_16; // blue
-
-const int pin_crsf_rx = pin_gpio_17; // green
-const int pin_crsf_tx = pin_tdi_output_only; // white
-
-
-const int pin_gps_tx = pin_gpio_25; // green
-const int pin_gps_rx = pin_gpio_22; // yellow
-
-const int pin_battery_voltage = pin_svp_input_only; // blue
-
-
-const int pin_right_encoder_a = pin_gpio_35_input_only; // ;  // green
-const int pin_right_encoder_b = pin_gpio_27;  // yellow
-
-const int pin_left_encoder_b = pin_gpio_34_input_only; // green
-const int pin_left_encoder_a = pin_gpio_33; // yellow
-
-const int pin_left_rev = pin_gpio_21;  // blue
-const int pin_left_fwd = pin_gpio_32;  // green
-const int pin_right_rev = pin_gpio_26;
-const int pin_right_fwd = pin_gpio_18;
-
- 
-// S2 Mini
-
-
-const int pin_left_tof_power = pin_gpio_19; 
-const int pin_center_tof_power = pin_gpio_23;
-const int pin_right_tof_power = pin_gpio_5;
-
-*/
-
 // LOLIN pins
-// S3 Mini pin mapping - ACTUAL WIRING
+// S3 Mini pin mapping 
 // I2C - using default S3 I2C pins
-const int pin_sda = 34;   // Yellow I2C SDA
+const int pin_sda = 34;   // Yellow I2C SDA 
 const int pin_scl = 35;   // Blue I2C SCL
 
 // CRSF (radio control)
-const int pin_crsf_rx = 38;  // CRSF RX (was GPIO 17)
-const int pin_crsf_tx = 36;  // CRSF TX (was TDI)
+const int pin_crsf_rx = 38;  // CRSF RX
+const int pin_crsf_tx = 36;  // CRSF TX
 
 // GPS
-const int pin_gps_tx = 9;   // GPS TX (was GPIO 25)
-const int pin_gps_rx = 10;  // GPS RX (was GPIO 22)
+const int pin_gps_tx = 9;   // GPS TX
+const int pin_gps_rx = 10;  // GPS RX
 
 // Battery voltage (ADC)
-const int pin_battery_voltage = 1;  // ADC input (was SVP/GPIO 36)
+const int pin_battery_voltage = 1;  // ADC input
 
 // Encoders
-const int pin_right_encoder_a = 2;   // Right encoder A (was GPIO 35)
-const int pin_right_encoder_b = 13;  // Right encoder B (was GPIO 27)
-const int pin_left_encoder_a = 4;    // Left encoder A (was GPIO 33)
-const int pin_left_encoder_b = 12;   // Left encoder B (was GPIO 34)
+const int pin_right_encoder_a = 2;   // Right encoder A
+const int pin_right_encoder_b = 13;  // Right encoder B
+const int pin_left_encoder_a = 4;    // Left encoder A
+const int pin_left_encoder_b = 12;   // Left encoder B
 
 // Motor control
-const int pin_left_fwd = 17;  // Left motor forward (was GPIO 32)
-const int pin_left_rev = 16;  // Left motor reverse (was GPIO 21)
-const int pin_right_fwd = 33;  // Right motor forward (was GPIO 18)
-const int pin_right_rev = 37;  // Right motor reverse (was GPIO 26)
+const int pin_left_fwd = 17;  // Left motor forward
+const int pin_left_rev = 16;  // Left motor reverse
+const int pin_right_fwd = 33;  // Right motor forward
+const int pin_right_rev = 37;  // Right motor reverse
 
 // ToF power control
-const int pin_left_tof_power = 6;    // Left ToF power (was GPIO 19)
-const int pin_center_tof_power = 7;  // Center ToF power (was GPIO 23)
-const int pin_right_tof_power = 8;   // Right ToF power (was GPIO 5)
+const int pin_left_tof_power = 6;    // Left ToF power
+const int pin_center_tof_power = 7;  // Center ToF power
+const int pin_right_tof_power = 8;   // Right ToF power
 
 
 
