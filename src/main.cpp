@@ -200,8 +200,13 @@ const int pin_scl = 35;   // Blue I2C SCL
 const int pin_crsf_rx = 38;  // CRSF RX
 const int pin_crsf_tx = 36;  // CRSF TX
 
+// Servos
+const int pin_servo_left = 7;
+const int pin_servo_center= 8;
+const int pin_servo_right = 9;
+
 // GPS
-const int pin_gps_tx = 9;   // GPS TX
+const int pin_gps_tx = 11;   // GPS TX -> 11
 const int pin_gps_rx = 10;  // GPS RX
 
 // Battery voltage (ADC)
@@ -220,9 +225,9 @@ const int pin_right_fwd = 33;  // Right motor forward
 const int pin_right_rev = 37;  // Right motor reverse
 
 // ToF power control
-const int pin_left_tof_power = 6;    // Left ToF power
-const int pin_center_tof_power = 7;  // Center ToF power
-const int pin_right_tof_power = 8;   // Right ToF power
+const int pin_left_tof_power = 3;    // Left ToF power ->3
+const int pin_center_tof_power = 5;  // Center ToF power ->5
+const int pin_right_tof_power = 6;   // Right ToF power ->6
 
 
 
