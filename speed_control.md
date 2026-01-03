@@ -151,43 +151,6 @@ Tasks:
 
 ---
 
-**Phase 3B: Acceleration Feedforward (OLD - REPLACED)**
-
-**API Design:**
-```cpp
-/**
- * Set twist velocity targets with optional acceleration specification.
- * 
- * @param v_linear Linear velocity (m/s), positive = forward
- * @param omega_angular Angular velocity (rad/s), positive = counter-clockwise
- * @param accel_linear Expected linear acceleration (m/s²):
- *                     - 0.0 = no explicit intent, apply internal ramping (default)
- *                     - Non-zero = explicit acceleration for feedforward
- * @param accel_angular Expected angular acceleration (rad/s²), similar behavior
- */
-void set_twist_target(float v_linear, float omega_angular, 
-                      float accel_linear = 0.0, 
-                      float accel_angular = 0.0);
-```
-
-**Implementation Tasks:**
-- Add `ff_accel` parameter to PIController (~0.5-1.0 V/(m/s²))
-- Add global acceleration limits: `max_linear_accel = 1.0 m/s²`, `max_angular_accel = 2.0 rad/s²`
-- In `update_twist_control()`:
-  - If `accel_linear == 0.0`: Apply internal ramping with `max_linear_accel` limit
-  - If `accel_linear != 0.0`: Use explicit acceleration for feedforward
-  - Same logic for angular acceleration
-- Add to PIController voltage: `v_total = v_ff + a_ff*a_cmd + v_pi`
-- Update `set_twist_target()` signature to accept acceleration parameters
-
-**Use Cases:**
-- **External commands (ROS `cmd_vel`, joystick):** Call `set_twist_target(1.0, 0.0)` → internal ramping applied
-- **Smart position control (`GoToCanMode`):** Compute acceleration, call `set_twist_target(v, ω, a_computed, 0.0)` → uses explicit feedforward
-- **Existing code:** Works unchanged with default `accel=0.0` → gets automatic smoothing
-
-**Verification:**
-- External velocity steps ramp smoothly at configured rate
-- `GoToCanMode` deceleration tracking improves (no PI windup during braking)
 
 **Phase 3C: Tuning Tests**
 

@@ -1,6 +1,6 @@
 #include <Arduino.h>
 #include <QMC5883LCompass.h>
-#include <VL53L1X.h>
+#include <VL53L1X.h>  // tof distance sensors
 #include <SPIFFS.h>
 #include <Wire.h>
 
@@ -265,6 +265,7 @@ struct TofSensor{
 TofSensor tof_left("left",&left_tof_distance_sensor_raw, pin_left_tof_power, left_tof_i2c_address);
 TofSensor tof_center = {"center",&center_tof_distance_sensor_raw, pin_center_tof_power, center_tof_i2c_address};
 TofSensor tof_right = {"right",&right_tof_distance_sensor_raw, pin_right_tof_power, right_tof_i2c_address};
+
 
 std::vector<TofSensor * > tof_sensors = {
   &tof_left,
@@ -1355,8 +1356,10 @@ void update_twist_control() {
   }
   
   // Apply motor commands
-  left_motor.go(pwm_left);
-  right_motor.go(pwm_right);
+  bool fast_decay = true;
+  left_motor.go(pwm_left, fast_decay);
+  right_motor.go(pwm_right, fast_decay\
+  );
 }
 
 //////////////////////////////////
@@ -1798,7 +1801,7 @@ public:
   float last_seen_millis = 0;
   float max_approach_velocity = 2.0;
   float max_angular_velocity = 0.5;
-  float max_accel = 2.5;
+  float max_accel = 4.0;
   float last_ms = millis();
   float last_v = 0.0;
 
@@ -1837,7 +1840,7 @@ public:
 
 
     const float steering_ratio = 1.5;
-    const uint32_t can_lost_timout_ms = 2000;
+    const uint32_t can_lost_timout_ms = 100;
 
 
     float stop_velocity = velocity_for_stop_distance(min_distance-goal_distance, max_accel);
@@ -2257,10 +2260,14 @@ void start_tof_distance_sensor(TofSensor & tof) {
   Short distance mode is more immune to ambient light, but its maximum ranging distance is typically limited to 1.3m.
   */
   tof.sensor->setDistanceMode(VL53L1X::Short);
+  
+  tof.sensor->setROICenter(188); // a few degrees up because left seems to be pointing lower
+
 
   tof.sensor->setMeasurementTimingBudget(tof_timing_budget_ms * 1000);
   tof.sensor->setTimeout(2);  // timeout ms for synchronous measurements
   tof.sensor->startContinuous(tof_timing_budget_ms);
+  tof.sensor->setROISize(16,5); // narrow band at center for ROI
   tof.running = true;
 }
 
