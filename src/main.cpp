@@ -1459,8 +1459,8 @@ class HandMode : public Task {
   virtual void execute() override {
     // servos should be up and out of the way
     center_servo.writeMicroseconds(servo_center_back_us);
-    left_servo.writeMicroseconds(servo_left_angled_us);
-    right_servo.writeMicroseconds(servo_right_angled_us);
+    left_servo.writeMicroseconds(servo_left_closed_us);
+    right_servo.writeMicroseconds(servo_right_closed_us);
     update_motor_speeds();
   }
 
@@ -1782,6 +1782,10 @@ public:
     // randomly turn left or right at every attempt
     bool rotate_left = ((millis() % 2) == 1);
 
+    center_servo.writeMicroseconds(servo_center_back_us);
+    left_servo.writeMicroseconds(servo_left_angled_us);
+    right_servo.writeMicroseconds(servo_right_angled_us);
+
 
     logf("find can mode begin (rotating %s)", rotate_left ? "left" : "right");
 
@@ -1843,6 +1847,10 @@ public:
   }
 
   void begin() override {
+    center_servo.writeMicroseconds(servo_center_flat_us);
+    left_servo.writeMicroseconds(servo_left_open_us);
+    right_servo.writeMicroseconds(servo_right_open_us);
+
     last_seen_millis = millis();
     logf("go-to-can mode begin");
     enable_twist_control();
@@ -1937,54 +1945,62 @@ public:
 
     logf("Can at ok distance of %f meters. Proceeding with lift can mode", can_distance);
     start_ms = millis();
+    enable_twist_control();
+
   }
 
   void execute() override {
-    const uint32_t begin_drop_arm_ms = 0;
-    const uint32_t start_close_gripper_ms = 500;
-    const uint32_t start_lift_can_ms = 800;
-    const uint32_t start_lower_can_ms = 1200;
-    const uint32_t start_open_gripper_ms = 1500;
-    const uint32_t start_raise_arm_ms = 1800;
-    const uint32_t done_ms = 2500;
+    // Define stages with durations
+    struct Stage {
+      uint32_t duration_ms;
+      float velocity;
+      float angular_velocity;
+      uint16_t left_us;
+      uint16_t right_us;
+      uint16_t center_us;
+      const char* description;
+    };
+    
+    const Stage stages[] = {
+      // {500,  servo_left_open_us,   servo_right_open_us,   servo_center_flat_us, "Drop arm"},
+      {500,  0.0,  0.0, servo_left_closed_us, servo_right_closed_us, servo_center_flat_us, "Close gripper"},
+      {400,  0.0,  0.0, servo_left_closed_us, servo_right_closed_us, servo_center_back_us, "Lift can"},
+      {3000, 0.0,  8.0, servo_left_closed_us, servo_right_closed_us, servo_center_back_us, "Celebrate"},
+      {1000, 0.0,  0.0, servo_left_closed_us, servo_right_closed_us, servo_center_back_us, "Chill"},
+      {300,  0.0,  0.0, servo_left_closed_us, servo_right_closed_us, servo_center_flat_us, "Lower can"},
+      {300,  0.0,  0.0, servo_left_angled_us, servo_right_angled_us,   servo_center_flat_us, "Open gripper"},
+      {700,  0.0,  0.0, servo_left_angled_us, servo_right_angled_us, servo_center_back_us, "Raise arm"},
+      {1500, -0.5, 0.0, servo_left_angled_us, servo_right_angled_us, servo_center_back_us, "Back up"}
+    };
 
+    const uint8_t num_stages = sizeof(stages)/sizeof(stages[0]);
+    
     uint32_t elapsed_ms = millis() - start_ms;
-
-    // if statements are in reverse time order, read bottom to top for actual sequence
-    if (elapsed_ms >= done_ms) {
-      set_done();
-      return;
-    } else if (elapsed_ms >= start_raise_arm_ms) {
-      // Stage 6: Raise arm back to angled position
-      left_servo.writeMicroseconds(servo_left_angled_us);
-      right_servo.writeMicroseconds(servo_right_angled_us);
-      center_servo.writeMicroseconds(servo_center_back_us);
-    } else if (elapsed_ms >= start_open_gripper_ms) {
-      // Stage 5: Open gripper to release can
-      left_servo.writeMicroseconds(servo_left_open_us);
-      right_servo.writeMicroseconds(servo_right_open_us);
-      center_servo.writeMicroseconds(servo_center_flat_us);
-    } else if (elapsed_ms >= start_lower_can_ms) {
-      // Stage 4: Lower can back down
-      left_servo.writeMicroseconds(servo_left_closed_us);
-      right_servo.writeMicroseconds(servo_right_closed_us);
-      center_servo.writeMicroseconds(servo_center_flat_us);
-    } else if (elapsed_ms >= start_lift_can_ms) {
-      // Stage 3: Lift can up
-      left_servo.writeMicroseconds(servo_left_closed_us);
-      right_servo.writeMicroseconds(servo_right_closed_us);
-      center_servo.writeMicroseconds(servo_center_back_us);
-    } else if (elapsed_ms >= start_close_gripper_ms) {
-      // Stage 2: Close gripper to grab can
-      center_servo.writeMicroseconds(servo_center_flat_us);
-      left_servo.writeMicroseconds(servo_left_closed_us);
-      right_servo.writeMicroseconds(servo_right_closed_us);
-    } else if (elapsed_ms >= begin_drop_arm_ms) {
-      // Stage 1: Drop arm down to can level
-      left_servo.writeMicroseconds(servo_left_open_us);
-      right_servo.writeMicroseconds(servo_right_open_us);
-      center_servo.writeMicroseconds(servo_center_flat_us);
+    
+    // Find which stage we're in by accumulating durations
+    uint32_t stage_start_ms = 0;
+    for (auto & stage: stages) {
+      uint32_t stage_end_ms = stage_start_ms + stage.duration_ms;
+      
+      if (elapsed_ms < stage_end_ms) {
+        // We're in stage i
+        set_twist_target(stage.velocity, stage.angular_velocity);
+        left_servo.writeMicroseconds(stage.left_us);
+        right_servo.writeMicroseconds(stage.right_us);
+        center_servo.writeMicroseconds(stage.center_us);
+        return;
+      }
+      
+      stage_start_ms = stage_end_ms;
     }
+    
+    // All stages complete
+    disable_twist_control();
+    set_done();
+  }
+
+  void end() override {
+    disable_twist_control();
   }
 
 
@@ -2102,7 +2118,9 @@ std::vector<Fsm::Edge> edges = {
     Fsm::Edge("hand", "sd-click", "find-can"),
     Fsm::Edge("find-can", "rc-moved", "hand"),
     Fsm::Edge("find-can", "done", "go-to-can"),
+    Fsm::Edge("go-to-can", "rc-moved", "hand"),
     Fsm::Edge("go-to-can", "done", "lift-can"),
+    Fsm::Edge("lift-can", "rc-moved", "hand"),
     Fsm::Edge("lift-can", "done", "hand"),
     Fsm::Edge("go-to-can", "lost-can", "find-can"),
     Fsm::Edge("go-to-can", "rc-moved", "hand"),
