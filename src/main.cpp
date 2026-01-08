@@ -3,6 +3,7 @@
 #include <VL53L1X.h>  // tof distance sensors
 #include <SPIFFS.h>
 #include <Wire.h>
+#include <Servo.h>
 
 #include <vector>
 #include <algorithm>
@@ -325,6 +326,22 @@ void set_temporary_display_string(const char * str) {
   strncpy(temporary_display_string, str, sizeof(temporary_display_string));
   temporary_display_string_set_ms = millis();
 }
+
+
+// Servo calibration numbers
+Servo left_servo, right_servo, center_servo;
+
+const int servo_left_closed_us = 600;
+const int servo_left_angled_us = 1100;
+const int servo_left_open_us = 1600;
+
+const int servo_right_closed_us = 2280;
+const int servo_right_angled_us = 1700;
+const int servo_right_open_us = 1200;
+
+const int servo_center_back_us = 2300;
+const int servo_center_flat_us = 1880;
+const int servo_center_forward_us = 2100;
 
 
 // virtual vbat floor and ceiling give the maximum range to set the voltage
@@ -1438,6 +1455,10 @@ class HandMode : public Task {
 
   // implement the execute method
   virtual void execute() override {
+    // servos should be up and out of the way
+    center_servo.writeMicroseconds(servo_center_back_us);
+    left_servo.writeMicroseconds(servo_left_angled_us);
+    right_servo.writeMicroseconds(servo_right_angled_us);
     update_motor_speeds();
   }
 
@@ -1512,6 +1533,10 @@ class OffMode : public Task {
   virtual void execute() override {
     left_motor.go(0);
     right_motor.go(0);
+    // left_servo.writeMicroseconds(0);
+    // right_servo.writeMicroseconds(0);
+    // center_servo.writeMicroseconds(0);
+
   }
 
 } off_mode;
@@ -1744,7 +1769,8 @@ to the center of a can placed within 3 feet of the robot.
 
 class FindCanMode : public Task {
 public:
-  float rotate_throttle = 0.25;
+
+  float rotate_radians_per_second = 3.0;
 
   FindCanMode() {
     name = "find-can";
@@ -1759,7 +1785,7 @@ public:
 
     enable_twist_control();
 
-    float rotation_radians_per_second = rotate_left ? 2.0 : -2.0;
+    float rotation_radians_per_second = rotate_left ? rotate_radians_per_second : -rotate_radians_per_second;
     float velocity = 0.0;
 
     set_twist_target(velocity, rotation_radians_per_second);
@@ -1802,11 +1828,11 @@ float velocity_for_stop_distance(float distance, float accel) {
 
 class GoToCanMode : public Task {
 public:
-  const float goal_distance = 0.05;
+  const float goal_distance = 0.06;
   float last_seen_millis = 0;
   float max_approach_velocity = 2.0;
-  float max_angular_velocity = 0.5;
-  float max_accel = 4.0;
+  float max_angular_velocity = 4.0;
+  float max_accel = 3.0;
   float last_ms = millis();
   float last_v = 0.0;
 
@@ -1881,6 +1907,86 @@ public:
   }
 
 } go_to_can_mode;
+
+class LiftCanMode : public Task {
+  float min_grabbable_can_distance = 0.03;
+  float max_grabbable_can_distance = 0.10;
+  uint32_t start_ms;
+
+public:
+  LiftCanMode() {
+    name = "lift-can";
+  }
+
+  void begin() override {
+    logf("lift-can mode begin");
+
+    float can_distance = std::min({nan_to_max(tof_center.distance), nan_to_max(tof_left.distance), nan_to_max(tof_right.distance)});
+    if (can_distance < min_grabbable_can_distance) {
+      logf( "Can at %f meters. Too close to grab. Aborting lift can mode", can_distance);
+      set_done();;
+      return;
+    }
+    if (can_distance > max_grabbable_can_distance) {
+      logf( "Can at %f meters. Too far to grab. Aborting lift can mode", can_distance);
+      set_done();
+      return;
+    }
+
+    logf("Can at ok distance of %f meters. Proceeding with lift can mode", can_distance);
+    start_ms = millis();
+  }
+
+  void execute() override {
+    const uint32_t begin_drop_arm_ms = 0;
+    const uint32_t start_close_gripper_ms = 500;
+    const uint32_t start_lift_can_ms = 800;
+    const uint32_t start_lower_can_ms = 1200;
+    const uint32_t start_open_gripper_ms = 1500;
+    const uint32_t start_raise_arm_ms = 1800;
+    const uint32_t done_ms = 2500;
+
+    uint32_t elapsed_ms = millis() - start_ms;
+
+    // if statements are in reverse time order, read bottom to top for actual sequence
+    if (elapsed_ms >= done_ms) {
+      set_done();
+      return;
+    } else if (elapsed_ms >= start_raise_arm_ms) {
+      // Stage 6: Raise arm back to angled position
+      left_servo.writeMicroseconds(servo_left_angled_us);
+      right_servo.writeMicroseconds(servo_right_angled_us);
+      center_servo.writeMicroseconds(servo_center_back_us);
+    } else if (elapsed_ms >= start_open_gripper_ms) {
+      // Stage 5: Open gripper to release can
+      left_servo.writeMicroseconds(servo_left_open_us);
+      right_servo.writeMicroseconds(servo_right_open_us);
+      center_servo.writeMicroseconds(servo_center_flat_us);
+    } else if (elapsed_ms >= start_lower_can_ms) {
+      // Stage 4: Lower can back down
+      left_servo.writeMicroseconds(servo_left_closed_us);
+      right_servo.writeMicroseconds(servo_right_closed_us);
+      center_servo.writeMicroseconds(servo_center_flat_us);
+    } else if (elapsed_ms >= start_lift_can_ms) {
+      // Stage 3: Lift can up
+      left_servo.writeMicroseconds(servo_left_closed_us);
+      right_servo.writeMicroseconds(servo_right_closed_us);
+      center_servo.writeMicroseconds(servo_center_back_us);
+    } else if (elapsed_ms >= start_close_gripper_ms) {
+      // Stage 2: Close gripper to grab can
+      center_servo.writeMicroseconds(servo_center_flat_us);
+      left_servo.writeMicroseconds(servo_left_closed_us);
+      right_servo.writeMicroseconds(servo_right_closed_us);
+    } else if (elapsed_ms >= begin_drop_arm_ms) {
+      // Stage 1: Drop arm down to can level
+      left_servo.writeMicroseconds(servo_left_open_us);
+      right_servo.writeMicroseconds(servo_right_open_us);
+      center_servo.writeMicroseconds(servo_center_flat_us);
+    }
+  }
+
+
+} lift_can_mode;
 
 class WaypointFollowingMode : public Task {
  public:
@@ -1960,6 +2066,9 @@ class FailsafeMode : public Task {
     Serial.write("failsafe mode\n");
     left_motor.go(0);
     right_motor.go(0);
+    // left_servo.writeMicroseconds(0);
+    // center_servo.writeMicroseconds(0);
+    // right_servo.writeMicroseconds(0);
   }
 } failsafe_mode;
 
@@ -1973,7 +2082,8 @@ std::vector<Task *> tasks = {
     &failsafe_mode,
     &calibrate_compass_mode,
     &find_can_mode,
-    &go_to_can_mode
+    &go_to_can_mode,
+    &lift_can_mode
 };
 
 std::vector<Fsm::Edge> edges = {
@@ -1990,9 +2100,11 @@ std::vector<Fsm::Edge> edges = {
     Fsm::Edge("hand", "sd-click", "find-can"),
     Fsm::Edge("find-can", "rc-moved", "hand"),
     Fsm::Edge("find-can", "done", "go-to-can"),
-    Fsm::Edge("go-to-can", "done", "hand"),
+    Fsm::Edge("go-to-can", "done", "lift-can"),
+    Fsm::Edge("lift-can", "done", "hand"),
     Fsm::Edge("go-to-can", "lost-can", "find-can"),
     Fsm::Edge("go-to-can", "rc-moved", "hand"),
+    
     //Fsm::Edge("hand", "sd-click", "open-loop"),
     //Fsm::Edge("hand", "sd-click", "pi-test"),
     Fsm::Edge("pi-test", "done", "hand"),
@@ -2266,7 +2378,7 @@ void start_tof_distance_sensor(TofSensor & tof) {
   */
   tof.sensor->setDistanceMode(VL53L1X::Short);
   
-  tof.sensor->setROICenter(188); // a few degrees up because left seems to be pointing lower
+   tof.sensor->setROICenter(188); // a few degrees up because left seems to be pointing lower
 
 
   tof.sensor->setMeasurementTimingBudget(tof_timing_budget_ms * 1000);
@@ -2511,6 +2623,17 @@ void setup() {
     Serial.println("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
     while(1);
   }
+
+  Serial.println("setting up servos");
+  left_servo.attach(pin_servo_left);
+  center_servo.attach(pin_servo_center);
+  right_servo.attach(pin_servo_right);
+
+  left_servo.writeMicroseconds(servo_left_angled_us);
+  center_servo.writeMicroseconds(servo_center_back_us);
+  right_servo.writeMicroseconds(servo_right_angled_us);
+
+
 
   Serial.println("bno055 begin successful");
 
