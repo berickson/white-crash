@@ -1376,12 +1376,14 @@ void update_twist_control() {
     pwm_left = constrain(pwm_left, -1.0, 1.0);
     pwm_right = constrain(pwm_right, -1.0, 1.0);
   }
-  
+
+  // use fast decay if we are trying to decelerate
+  bool fast_decay_left = fabs(v_left_target) < fabs(v_left_actual);
+  bool fast_decay_right = fabs(v_right_target) < fabs(v_right_actual);
+
   // Apply motor commands
-  bool fast_decay = true;
-  left_motor.go(pwm_left, fast_decay);
-  right_motor.go(pwm_right, fast_decay\
-  );
+  left_motor.go(pwm_left, fast_decay_left);
+  right_motor.go(pwm_right, fast_decay_right);
 }
 
 //////////////////////////////////
@@ -1832,7 +1834,7 @@ public:
   float last_seen_millis = 0;
   float max_approach_velocity = 2.0;
   float max_angular_velocity = 4.0;
-  float max_accel = 3.0;
+  float max_accel = 2.0;
   float last_ms = millis();
   float last_v = 0.0;
 
