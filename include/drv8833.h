@@ -25,6 +25,11 @@ class DRV8833 {
 
         // rate is [-1.0,1.0], fast_decay will cause faster
         // deceleration
+        // NOTE: fast_decay parameter is deprecated and should be removed
+        // It doesn't make sense to use fast_decay with active throttle (they fight each other)
+        // Current code (go to can mode) still uses it, so keeping for compatibility
+        // All new code should pass fast_decay=false
+        // TODO: Remove fast_decay parameter when client code is refactored
         void go(float rate, bool fast_decay = false) {
             setpoint = rate;
             pinMode(pin_fwd, OUTPUT);
@@ -41,9 +46,31 @@ class DRV8833 {
                 return;
             }
             if (fast_decay) {
-                brake();
+                brake(1.0f);
+            } else {
+                coast();
             }
-            coast();
+        }
+
+        // Proportional braking control
+        // intensity ∈ [0, 1]
+        //   0.0 = full coast (both pins LOW)
+        //   1.0 = full brake (both pins HIGH) 
+        //   0 < intensity < 1 = PWM brake duty cycle
+        // Use brake(1.0) for position holding when stopped
+        void brake(float intensity) {
+            intensity = clamp(intensity, 0.0f, 1.0f);
+            
+            if (intensity <= 0.0) {
+                coast();
+                return;
+            }
+            
+            // Apply brake with PWM duty cycle
+            int range = 1 << resolution;
+            int duty = (int)(intensity * range);
+            analogWrite(pin_fwd, duty);
+            analogWrite(pin_rev, duty);
         }
 
     private:
@@ -56,11 +83,6 @@ class DRV8833 {
         void coast() {
             digitalWrite(pin_fwd, 0);
             digitalWrite(pin_rev, 0);
-        }
-
-        void brake() {
-            digitalWrite(pin_fwd, 1);
-            digitalWrite(pin_rev, 1);
         }
 
         void forward(float rate, bool fast_decay = true) {
