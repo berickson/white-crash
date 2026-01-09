@@ -402,6 +402,12 @@ rcl_publisher_t nav_sat_fix_publisher;
 rcl_subscription_t cmd_vel_subscription;
 rclc_executor_t executor;
 
+// Command REPL infrastructure
+rcl_subscription_t command_subscription;
+rcl_publisher_t command_response_publisher;
+std_msgs__msg__String command_msg;
+std_msgs__msg__String command_response_msg;
+
 sensor_msgs__msg__Range tof_distance_msg;
 std_msgs__msg__String log_msg;
 std_msgs__msg__Float32 battery_msg;
@@ -548,6 +554,47 @@ void cmd_vel_callback(const void *msgin) {
   cmd_vel_last_received_ms = millis();
 }
 
+// Helper to publish REPL response
+void send_command_response(const char* response_text) {
+  if (!ros_ready) return;
+  
+  // Set string data
+  command_response_msg.data.data = (char*)response_text;
+  command_response_msg.data.size = strlen(response_text);
+  command_response_msg.data.capacity = strlen(response_text) + 1;
+  
+  RCSOFTCHECK(rcl_publish(&command_response_publisher, &command_response_msg, NULL));
+}
+
+// forward declare set_fs_event so we can use it from commands
+void set_fsm_event(const char * event_name);
+
+// Command REPL callback
+void command_callback(const void *msgin) {
+  const std_msgs__msg__String *msg = (const std_msgs__msg__String *)msgin;
+  
+  // Parse command from msg->data.data (null-terminated string)
+  char response[128];
+  
+  // Simple parser: check if starts with "set-event "
+  if (strncmp(msg->data.data, "set-event ", 10) == 0) {
+    // Extract event name (everything after "set-event ")
+    const char* event_name = msg->data.data + 10;
+    
+    // Trigger FSM event
+    set_fsm_event(event_name);
+    
+    snprintf(response, sizeof(response), "OK: Triggered event '%s'", event_name);
+    logf("REPL: %s", response);
+  } else {
+    snprintf(response, sizeof(response), "ERROR: Unknown command '%s'", msg->data.data);
+    logf("REPL: %s", response);
+  }
+  
+  // Send response
+  send_command_response(response);
+}
+
 void error_loop() {
   while (true) {
     Serial.printf("error in micro_ros, error_loop() entered\n");
@@ -610,15 +657,32 @@ void create_ros_node_and_publishers() {
       ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
       "/white_crash/cmd_vel"));
 
-  // create executor
-  RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
+  // Command REPL publisher
+  RCCHECK(rclc_publisher_init_best_effort(
+      &command_response_publisher,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+      "/white_crash/command_response"));
+
+  // Command REPL subscription
+  RCCHECK(rclc_subscription_init_best_effort(
+      &command_subscription,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+      "/white_crash/command"));
+
+  // create executor (updated capacity from 1 to 2 subscriptions)
+  RCCHECK(rclc_executor_init(&executor, &support.context, 2, &allocator));
   RCCHECK(rclc_executor_add_subscription(&executor, &cmd_vel_subscription, &cmd_vel_msg, &cmd_vel_callback, ON_NEW_DATA));
+  RCCHECK(rclc_executor_add_subscription(&executor, &command_subscription, &command_msg, &command_callback, ON_NEW_DATA));
 }
 
 void destroy_ros_node_and_publishers() { 
   RCCHECK(rclc_executor_fini(&executor));
   RCCHECK(rcl_subscription_fini(&cmd_vel_subscription, &node));
+  RCCHECK(rcl_subscription_fini(&command_subscription, &node));
   RCCHECK(rcl_publisher_fini(&log_publisher, &node));
+  RCCHECK(rcl_publisher_fini(&command_response_publisher, &node));
   RCCHECK(rcl_publisher_fini(&battery_publisher, &node));
   RCCHECK(rcl_publisher_fini(&rosout_publisher, &node));
   RCCHECK(rcl_publisher_fini(&update_publisher, &node));
@@ -2421,6 +2485,11 @@ std::vector<Fsm::Edge> edges = {
 
 Fsm fsm(tasks, edges);
 
+
+void set_fsm_event(const char * event_name) {
+    fsm.set_event(event_name);
+}
+
 void i2c_sensor_thread(void *arg) {
   // Register this task with watchdog
   esp_task_wdt_add(NULL);
@@ -2887,6 +2956,15 @@ void setup() {
   strncpy(rosout_msg.function.data, "", 20);
   rosout_msg.function.size = 0;
   rosout_msg.line = 0;
+
+  // preallocate command REPL messages
+  command_msg.data.data = (char *)malloc(128);
+  command_msg.data.capacity = 128;
+  command_msg.data.size = 0;
+  
+  command_response_msg.data.data = (char *)malloc(128);
+  command_response_msg.data.capacity = 128;
+  command_response_msg.data.size = 0;
 
   Serial.printf("[%lu ms] Log messages allocated\n", millis());
   tof_distance_msg.header.frame_id.data = (char *)malloc(20);
