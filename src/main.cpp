@@ -1764,6 +1764,283 @@ class PIControlTestMode : public Task {
 } pi_control_test_mode;
 
 
+//////////////////////////////////////////////
+// Force Characterization Mode
+//////////////////////////////////////////////
+/*
+Automated force characterization for motor control optimization.
+Runs systematic tests to measure deceleration forces across different control modes:
+  1. Reduced forward PWM (gentle deceleration)
+  2. Coast (moderate deceleration)
+  3. Proportional braking (aggressive deceleration)
+  4. Pure brake (maximum deceleration)
+  5. Reverse torque (emergency - use carefully)
+
+Tests are designed to be run first on racks (safe, repeatable), then on ground for validation.
+*/
+class ForceCharacterizationMode : public Task {
+public:
+  // Test configuration
+  enum TestType {
+    reduced_pwm,      // Test 1: Reduce forward PWM
+    coast,            // Test 2: Coast deceleration
+    prop_brake,       // Test 3: Proportional braking
+    pure_brake,       // Test 4: Pure brake
+    reverse_torque,   // Test 5: Reverse torque (careful!)
+    test_complete
+  };
+
+  enum TestStage {
+    rack,
+    ground
+  };
+
+  enum State {
+    accelerating,     // Getting to target velocity
+    settling,         // Waiting for steady state
+    testing,          // Applying test condition
+    resting,          // Rest between trials
+    done
+  };
+
+  // Test parameters for each type
+  struct TestConfig {
+    TestType type;
+    float target_velocity;  // m/s
+    float test_parameter;   // PWM level, brake duty, etc.
+  };
+
+  // All test configurations (will be populated in begin())
+  std::vector<TestConfig> test_sequence;
+  int current_test_index = 0;
+
+  State state = accelerating;
+  TestStage stage = rack;
+  unsigned long state_start_time = 0;
+
+  // Timing constants
+  const unsigned long accel_timeout_ms = 5000;     // Max time to reach velocity
+  const unsigned long settle_time_ms = 1000;       // Wait for steady state
+  const unsigned long test_duration_ms = 3000;     // Record test data
+  const unsigned long rest_time_ms = 2000;         // Rest between trials
+
+  // Velocity tolerance for "steady state"
+  const float velocity_tolerance = 0.05;  // m/s
+
+  ForceCharacterizationMode() {
+    name = "force-char";
+  }
+
+  void build_test_sequence() {
+    test_sequence.clear();
+
+    // Test 1: Reduced Forward PWM (20 trials)
+    float pwm_levels[5] = {0.8, 0.6, 0.4, 0.2, 0.0};
+    float velocities_1[4] = {0.5, 1.0, 2.0, 3.0};
+    for (float v : velocities_1) {
+      for (float pwm : pwm_levels) {
+        test_sequence.push_back({reduced_pwm, v, pwm});
+      }
+    }
+
+    // Test 2: Coast (6 trials)
+    float velocities_2[6] = {0.5, 1.0, 1.5, 2.0, 2.5, 3.0};
+    for (float v : velocities_2) {
+      test_sequence.push_back({coast, v, 0.0});
+    }
+
+    // Test 3: Proportional Braking (20 trials)
+    float brake_levels[5] = {0.2, 0.4, 0.6, 0.8, 1.0};
+    float velocities_3[4] = {0.5, 1.0, 2.0, 3.0};
+    for (float v : velocities_3) {
+      for (float brake : brake_levels) {
+        test_sequence.push_back({prop_brake, v, brake});
+      }
+    }
+
+    // Test 4: Pure Brake (6 trials)
+    for (float v : velocities_2) {
+      test_sequence.push_back({pure_brake, v, 1.0});
+    }
+
+    // Test 5: Reverse Torque (6 trials) - CAREFUL, low speeds only!
+    float reverse_pwm[3] = {0.1, 0.2, 0.3};
+    float velocities_5[2] = {0.2, 0.4};
+    for (float v : velocities_5) {
+      for (float pwm : reverse_pwm) {
+        test_sequence.push_back({reverse_torque, v, pwm});
+      }
+    }
+
+    logf("Force characterization: %d tests configured", test_sequence.size());
+  }
+
+  virtual void begin() override {
+    logf("Force Characterization Mode begin - Stage: %s", 
+         stage == rack ? "rack" : "ground");
+    
+    build_test_sequence();
+    current_test_index = 0;
+    state = accelerating;
+    state_start_time = millis();
+
+    // Start with first test
+    start_next_test();
+  }
+
+  void start_next_test() {
+    if (current_test_index >= test_sequence.size()) {
+      state = done;
+      return;
+    }
+
+    const TestConfig& test = test_sequence[current_test_index];
+    state = accelerating;
+    state_start_time = millis();
+
+    // Enable twist control to accelerate to target velocity
+    enable_twist_control();
+    set_twist_target(test.target_velocity, 0.0, 0.0, 0.0);
+
+    const char* test_names[] = {"reduced_pwm", "coast", "prop_brake", "pure_brake", "reverse_torque"};
+    logf("Starting test %d/%d: %s @ %.2f m/s, param=%.2f", 
+         current_test_index + 1, test_sequence.size(),
+         test_names[test.type], test.target_velocity, test.test_parameter);
+  }
+
+  void apply_test_condition() {
+    const TestConfig& test = test_sequence[current_test_index];
+
+    // Disable twist control - we're taking direct motor control
+    disable_twist_control();
+
+    switch (test.type) {
+      case reduced_pwm:
+        // Reduce forward PWM
+        left_motor.go(test.test_parameter);
+        right_motor.go(test.test_parameter);
+        break;
+
+      case coast:
+        // Coast - 0% PWM
+        left_motor.go(0.0);
+        right_motor.go(0.0);
+        break;
+
+      case prop_brake:
+        // Proportional braking
+        left_motor.brake(test.test_parameter);
+        right_motor.brake(test.test_parameter);
+        break;
+
+      case pure_brake:
+        // Full brake
+        left_motor.brake(1.0);
+        right_motor.brake(1.0);
+        break;
+
+      case reverse_torque:
+        // Reverse PWM (CAREFUL!)
+        left_motor.go(-test.test_parameter);
+        right_motor.go(-test.test_parameter);
+        break;
+
+      case test_complete:
+        break;
+    }
+  }
+
+  bool at_target_velocity() {
+    const TestConfig& test = test_sequence[current_test_index];
+    float avg_velocity = (left_speedometer.get_velocity() + right_speedometer.get_velocity()) / 2.0;
+    return fabs(avg_velocity - test.target_velocity) < velocity_tolerance;
+  }
+
+  virtual void execute() override {
+    if (state == done) {
+      set_done();
+      return;
+    }
+
+    unsigned long elapsed = millis() - state_start_time;
+    const TestConfig& test = test_sequence[current_test_index];
+
+    switch (state) {
+      case accelerating:
+        // Wait for velocity to reach target
+        if (at_target_velocity()) {
+          logf("Target velocity reached, settling...");
+          state = settling;
+          state_start_time = millis();
+        } else if (elapsed > accel_timeout_ms) {
+          logf("WARNING: Acceleration timeout, proceeding anyway");
+          state = settling;
+          state_start_time = millis();
+        }
+        break;
+
+      case settling:
+        // Wait for steady state
+        if (elapsed >= settle_time_ms) {
+          logf("Settled, applying test condition");
+          apply_test_condition();
+          state = testing;
+          state_start_time = millis();
+        }
+        break;
+
+      case testing:
+        // Record data (happening automatically via ROS messages)
+        if (elapsed >= test_duration_ms) {
+          logf("Test complete, resting...");
+          // Stop motors safely
+          left_motor.go(0.0);
+          right_motor.go(0.0);
+          state = resting;
+          state_start_time = millis();
+        }
+        break;
+
+      case resting:
+        // Rest between trials
+        if (elapsed >= rest_time_ms) {
+          current_test_index++;
+          start_next_test();
+        }
+        break;
+
+      case done:
+        set_done();
+        break;
+    }
+  }
+
+  virtual void end() override {
+    logf("Force Characterization Mode end - %d tests completed", current_test_index);
+    disable_twist_control();
+    left_motor.go(0.0);
+    right_motor.go(0.0);
+  }
+
+  virtual void get_display_string(char * buffer, int buffer_size) override {
+    const char* test_names[] = {"ReducePWM", "Coast", "PropBrake", "PureBrake", "Reverse"};
+    const char* state_names[] = {"Accel", "Settle", "Test", "Rest", "Done"};
+    
+    if (current_test_index < test_sequence.size()) {
+      const TestConfig& test = test_sequence[current_test_index];
+      snprintf(buffer, buffer_size, "FC:%s %s %d/%d", 
+               state_names[state],
+               test_names[test.type],
+               current_test_index + 1,
+               (int)test_sequence.size());
+    } else {
+      snprintf(buffer, buffer_size, "FC: Complete");
+    }
+  }
+
+} force_char_mode;
+
+
 /*
 this task will rotate the robot in place until is pointing
 to the center of a can placed within 3 feet of the robot.
@@ -2095,6 +2372,7 @@ std::vector<Task *> tasks = {
     &off_mode,
     &open_loop_characterization_mode,
     &pi_control_test_mode,
+    &force_char_mode,
     &cmd_vel_auto_mode,
     &waypoint_following_mode,
     &failsafe_mode,
@@ -2131,6 +2409,13 @@ std::vector<Fsm::Edge> edges = {
     Fsm::Edge("pi-test", "rc-moved", "hand"),
     Fsm::Edge("open-loop", "done", "hand"),
     Fsm::Edge("open-loop", "rc-moved", "hand"),
+    
+    // Force characterization mode (rack and ground)
+    //Fsm::Edge("hand", "force-char-rack", "force-char"),
+    //Fsm::Edge("hand", "force-char-ground", "force-char"),
+    Fsm::Edge("force-char", "done", "hand"),
+    Fsm::Edge("force-char", "rc-moved", "hand"),
+    
     Fsm::Edge("*", "off", "off"),
 };
 
