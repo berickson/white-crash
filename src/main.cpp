@@ -146,7 +146,7 @@ class Severity {
 // Feature enable/disable
 const bool use_gnss = true; // sparkfun ublox
 const bool use_gps = false;  // tinygps
-const bool enable_stats_logging = true;
+const bool enable_stats_logging = false;
 
 // calibration constants
 //float meters_per_odometer_tick = 0.00008204; // S
@@ -266,7 +266,10 @@ struct TofSensor{
   rcl_publisher_t publisher;
   char name[20];
   uint32_t turn_off_ms = 0;
-
+  
+  // For pending publish from ros_thread
+  volatile bool pending = false;
+  sensor_msgs__msg__Range pending_msg;
 };
 TofSensor tof_left("left",&left_tof_distance_sensor_raw, pin_left_tof_power, left_tof_i2c_address);
 TofSensor tof_center = {"center",&center_tof_distance_sensor_raw, pin_center_tof_power, center_tof_i2c_address};
@@ -315,8 +318,19 @@ double v_bat = NAN;
 bool ros_ready = false;
 bool crash_data_published_to_ros = false;
 
+// Pending publish flags - set by loop(), cleared by ros_thread after publishing
+// This avoids race conditions on the UDP transport
+volatile bool update_msg_pending = false;
+volatile bool battery_msg_pending = false;
+volatile bool nav_sat_fix_msg_pending = false;
+volatile bool log_msg_pending = false;
+volatile bool rosout_msg_pending = false;
+
 // Mutex for protecting sensor data shared between i2c_sensor_thread and main loop
 SemaphoreHandle_t sensor_data_mutex = NULL;
+
+// Note: publish_mutex removed - all ROS publishing now happens in ros_thread
+// via pending flags, eliminating the race condition on UDP transport
 
 char temporary_display_string[16] = {0};
 unsigned long temporary_display_string_set_ms = 0;
@@ -470,8 +484,9 @@ void set_stamp(builtin_interfaces__msg__Time & stamp) {
 // logs to ros and serial
 void log(std_msgs__msg__String &msg) {
   BlockTimer bt(log_stats);
-  if (ros_ready) {
-    RCSOFTCHECK(rcl_publish(&log_publisher, &msg, NULL));
+  // Mark pending for ros_thread to publish (only if not already pending)
+  if (ros_ready && !log_msg_pending) {
+    log_msg_pending = true;
   }
   Serial.write(msg.data.data, msg.data.size);
   Serial.write("\n");
@@ -479,8 +494,9 @@ void log(std_msgs__msg__String &msg) {
 
 void log_rosout(rcl_interfaces__msg__Log &msg) {
   BlockTimer bt(log_stats);
-  if (ros_ready) {
-    RCSOFTCHECK(rcl_publish(&rosout_publisher, &msg, NULL));
+  // Mark pending for ros_thread to publish (only if not already pending)
+  if (ros_ready && !rosout_msg_pending) {
+    rosout_msg_pending = true;
   }
 }
 
@@ -563,11 +579,21 @@ void send_command_response(const char* response_text) {
   command_response_msg.data.size = strlen(response_text);
   command_response_msg.data.capacity = strlen(response_text) + 1;
   
+  // This is called from executor callback which runs in ros_thread
+  // All ROS transport happens in ros_thread so no mutex needed
   RCSOFTCHECK(rcl_publish(&command_response_publisher, &command_response_msg, NULL));
 }
 
 // forward declare set_fs_event so we can use it from commands
 void set_fsm_event(const char * event_name);
+
+// Forward declaration for force characterization command
+bool configure_force_test(const char* mode_str, float velocity, float param);
+
+// Forward declaration for force characterization mode
+class ForceCharacterizationMode;
+extern ForceCharacterizationMode force_char_mode;
+void set_force_char_ground_mode(bool ground);
 
 // Command REPL callback
 void command_callback(const void *msgin) {
@@ -576,17 +602,41 @@ void command_callback(const void *msgin) {
   // Parse command from msg->data.data (null-terminated string)
   char response[128];
   
-  // Simple parser: check if starts with "set-event "
+  // Command: set-event <name>
   if (strncmp(msg->data.data, "set-event ", 10) == 0) {
-    // Extract event name (everything after "set-event ")
     const char* event_name = msg->data.data + 10;
     
-    // Trigger FSM event
-    set_fsm_event(event_name);
+    // Special handling for force-char events: set ground mode flag
+    if (strcmp(event_name, "force-char-ground") == 0) {
+      set_force_char_ground_mode(true);
+    } else if (strcmp(event_name, "force-char-rack") == 0) {
+      set_force_char_ground_mode(false);
+    }
     
+    set_fsm_event(event_name);
     snprintf(response, sizeof(response), "OK: Triggered event '%s'", event_name);
     logf("REPL: %s", response);
-  } else {
+  }
+  // Command: force-test <mode> <velocity> <param>
+  // Example: force-test coast 1.0 0.0
+  else if (strncmp(msg->data.data, "force-test ", 11) == 0) {
+    char mode_str[32];
+    float velocity, param;
+    int parsed = sscanf(msg->data.data + 11, "%31s %f %f", mode_str, &velocity, &param);
+    
+    if (parsed == 3) {
+      if (configure_force_test(mode_str, velocity, param)) {
+        snprintf(response, sizeof(response), "OK: Configured force-test %s %.2f %.2f", 
+                 mode_str, velocity, param);
+      } else {
+        snprintf(response, sizeof(response), "ERROR: Invalid mode '%s'", mode_str);
+      }
+    } else {
+      snprintf(response, sizeof(response), "ERROR: Usage: force-test <mode> <velocity> <param>");
+    }
+    logf("REPL: %s", response);
+  }
+  else {
     snprintf(response, sizeof(response), "ERROR: Unknown command '%s'", msg->data.data);
     logf("REPL: %s", response);
   }
@@ -1844,49 +1894,42 @@ Tests are designed to be run first on racks (safe, repeatable), then on ground f
 */
 class ForceCharacterizationMode : public Task {
 public:
-  // Test configuration
+  // Test modes (set via command)
   enum TestType {
-    reduced_pwm,      // Test 1: Reduce forward PWM
-    coast,            // Test 2: Coast deceleration
-    prop_brake,       // Test 3: Proportional braking
-    pure_brake,       // Test 4: Pure brake
-    reverse_torque,   // Test 5: Reverse torque (careful!)
-    test_complete
-  };
-
-  enum TestStage {
-    rack,
-    ground
+    reduced_pwm,      // Reduce forward PWM to param value
+    coast,            // Coast (0% PWM)
+    prop_brake,       // Proportional braking at param duty
+    pure_brake,       // Full brake
+    reverse_torque,   // Reverse PWM (careful!)
+    none
   };
 
   enum State {
+    idle,             // Waiting for test config
     accelerating,     // Getting to target velocity
     settling,         // Waiting for steady state
     testing,          // Applying test condition
-    resting,          // Rest between trials
-    done
+    complete          // Test done, waiting for next command
   };
 
-  // Test parameters for each type
-  struct TestConfig {
-    TestType type;
-    float target_velocity;  // m/s
-    float test_parameter;   // PWM level, brake duty, etc.
-  };
+  // Single test configuration (set via command before triggering mode)
+  TestType test_type = none;
+  float target_velocity = 0.0;  // m/s
+  float test_parameter = 0.0;   // PWM level, brake duty, etc.
+  bool is_ground_test = false;  // True for ground tests (enables safety features)
 
-  // All test configurations (will be populated in begin())
-  std::vector<TestConfig> test_sequence;
-  int current_test_index = 0;
-
-  State state = accelerating;
-  TestStage stage = rack;
+  State state = idle;
   unsigned long state_start_time = 0;
 
-  // Timing constants
-  const unsigned long accel_timeout_ms = 5000;     // Max time to reach velocity
-  const unsigned long settle_time_ms = 1000;       // Wait for steady state
-  const unsigned long test_duration_ms = 3000;     // Record test data
-  const unsigned long rest_time_ms = 2000;         // Rest between trials
+  // Timing constants (can be adjusted via commands if needed)
+  unsigned long accel_timeout_ms = 5000;     // Max time to reach velocity
+  unsigned long settle_time_ms = 1000;       // Wait for steady state
+  unsigned long test_duration_ms = 3000;     // Record test data (rack)
+  
+  // Ground test safety parameters
+  const float tof_safety_distance_mm = 150.0;  // Emergency stop if wall closer than this
+  const float stopped_velocity = 0.03;         // Consider stopped when below this (m/s)
+  const unsigned long ground_test_max_ms = 2000;  // Max ground test duration (shorter for safety)
 
   // Velocity tolerance for "steady state"
   const float velocity_tolerance = 0.05;  // m/s
@@ -1895,143 +1938,165 @@ public:
     name = "force-char";
   }
 
-  void build_test_sequence() {
-    test_sequence.clear();
-
-    // Test 1: Reduced Forward PWM (20 trials)
-    float pwm_levels[5] = {0.8, 0.6, 0.4, 0.2, 0.0};
-    float velocities_1[4] = {0.5, 1.0, 2.0, 3.0};
-    for (float v : velocities_1) {
-      for (float pwm : pwm_levels) {
-        test_sequence.push_back({reduced_pwm, v, pwm});
-      }
+  // Set whether this is a ground test (enables safety features)
+  void set_ground_mode(bool ground) {
+    is_ground_test = ground;
+    if (ground) {
+      logf("Ground test mode: TOF safety ON, velocity-based completion ON");
     }
+  }
 
-    // Test 2: Coast (6 trials)
-    float velocities_2[6] = {0.5, 1.0, 1.5, 2.0, 2.5, 3.0};
-    for (float v : velocities_2) {
-      test_sequence.push_back({coast, v, 0.0});
+  // Called by command handler to configure the test
+  bool configure_test(const char* mode_str, float velocity, float param) {
+    // Parse mode string
+    if (strcmp(mode_str, "reduced_pwm") == 0) {
+      test_type = reduced_pwm;
+    } else if (strcmp(mode_str, "coast") == 0) {
+      test_type = coast;
+    } else if (strcmp(mode_str, "prop_brake") == 0) {
+      test_type = prop_brake;
+    } else if (strcmp(mode_str, "pure_brake") == 0) {
+      test_type = pure_brake;
+    } else if (strcmp(mode_str, "reverse") == 0) {
+      test_type = reverse_torque;
+    } else {
+      logf("ERROR: Unknown test mode '%s'", mode_str);
+      return false;
     }
+    
+    target_velocity = velocity;
+    test_parameter = param;
+    
+    logf("Configured force test: %s @ %.2f m/s, param=%.2f", 
+         mode_str, target_velocity, test_parameter);
+    return true;
+  }
 
-    // Test 3: Proportional Braking (20 trials)
-    float brake_levels[5] = {0.2, 0.4, 0.6, 0.8, 1.0};
-    float velocities_3[4] = {0.5, 1.0, 2.0, 3.0};
-    for (float v : velocities_3) {
-      for (float brake : brake_levels) {
-        test_sequence.push_back({prop_brake, v, brake});
-      }
+  // Get current state as string for Python to poll
+  const char* get_state_string() {
+    switch (state) {
+      case idle: return "idle";
+      case accelerating: return "accelerating";
+      case settling: return "settling";
+      case testing: return "testing";
+      case complete: return "complete";
+      default: return "unknown";
     }
-
-    // Test 4: Pure Brake (6 trials)
-    for (float v : velocities_2) {
-      test_sequence.push_back({pure_brake, v, 1.0});
-    }
-
-    // Test 5: Reverse Torque (6 trials) - CAREFUL, low speeds only!
-    float reverse_pwm[3] = {0.1, 0.2, 0.3};
-    float velocities_5[2] = {0.2, 0.4};
-    for (float v : velocities_5) {
-      for (float pwm : reverse_pwm) {
-        test_sequence.push_back({reverse_torque, v, pwm});
-      }
-    }
-
-    logf("Force characterization: %d tests configured", test_sequence.size());
   }
 
   virtual void begin() override {
-    logf("Force Characterization Mode begin - Stage: %s", 
-         stage == rack ? "rack" : "ground");
-    
-    build_test_sequence();
-    current_test_index = 0;
-    state = accelerating;
-    state_start_time = millis();
-
-    // Start with first test
-    start_next_test();
-  }
-
-  void start_next_test() {
-    if (current_test_index >= test_sequence.size()) {
-      state = done;
+    if (test_type == none) {
+      logf("ERROR: No test configured, use 'force-test <mode> <velocity> <param>' first");
+      state = complete;
       return;
     }
-
-    const TestConfig& test = test_sequence[current_test_index];
+    
+    const char* mode_names[] = {"reduced_pwm", "coast", "prop_brake", "pure_brake", "reverse"};
+    logf("Force test begin: %s @ %.2f m/s, param=%.2f", 
+         mode_names[test_type], target_velocity, test_parameter);
+    
     state = accelerating;
     state_start_time = millis();
 
-    // Enable twist control to accelerate to target velocity
+    // Use twist control with 30% higher target for aggressive acceleration
+    // The at_target_velocity() check will trigger when we reach actual target
+    float accel_target = target_velocity * 1.3;
+    
     enable_twist_control();
-    set_twist_target(test.target_velocity, 0.0, 0.0, 0.0);
-
-    const char* test_names[] = {"reduced_pwm", "coast", "prop_brake", "pure_brake", "reverse_torque"};
-    logf("Starting test %d/%d: %s @ %.2f m/s, param=%.2f", 
-         current_test_index + 1, test_sequence.size(),
-         test_names[test.type], test.target_velocity, test.test_parameter);
+    set_twist_target(accel_target, 0.0, 0.0, 0.0);
+    
+    logf("Accelerating with twist control target=%.2f m/s (actual target=%.2f)", 
+         accel_target, target_velocity);
   }
 
   void apply_test_condition() {
-    const TestConfig& test = test_sequence[current_test_index];
-
-    // Disable twist control - we're taking direct motor control
+    // Apply the test condition (coast, brake, etc.)
+    // Disable twist control and switch to direct motor control
     disable_twist_control();
+    logf("Applying test condition");
 
-    switch (test.type) {
+    switch (test_type) {
       case reduced_pwm:
-        // Reduce forward PWM
-        left_motor.go(test.test_parameter);
-        right_motor.go(test.test_parameter);
+        left_motor.go(test_parameter);
+        right_motor.go(test_parameter);
         break;
 
       case coast:
-        // Coast - 0% PWM
         left_motor.go(0.0);
         right_motor.go(0.0);
         break;
 
       case prop_brake:
-        // Proportional braking
-        left_motor.brake(test.test_parameter);
-        right_motor.brake(test.test_parameter);
+        left_motor.brake(test_parameter);
+        right_motor.brake(test_parameter);
         break;
 
       case pure_brake:
-        // Full brake
         left_motor.brake(1.0);
         right_motor.brake(1.0);
         break;
 
       case reverse_torque:
-        // Reverse PWM (CAREFUL!)
-        left_motor.go(-test.test_parameter);
-        right_motor.go(-test.test_parameter);
+        left_motor.go(-test_parameter);
+        right_motor.go(-test_parameter);
         break;
 
-      case test_complete:
+      case none:
         break;
     }
   }
 
   bool at_target_velocity() {
-    const TestConfig& test = test_sequence[current_test_index];
     float avg_velocity = (left_speedometer.get_velocity() + right_speedometer.get_velocity()) / 2.0;
-    return fabs(avg_velocity - test.target_velocity) < velocity_tolerance;
+    // Check if we've reached or exceeded target velocity
+    // (tolerance band approach misses target when accelerating too fast)
+    if (target_velocity > 0) {
+      return avg_velocity >= (target_velocity - velocity_tolerance);
+    } else {
+      // For reverse motion
+      return avg_velocity <= (target_velocity + velocity_tolerance);
+    }
+  }
+
+  // Check if robot is effectively stopped
+  bool is_stopped() {
+    float avg_velocity = fabs(left_speedometer.get_velocity()) + fabs(right_speedometer.get_velocity());
+    return avg_velocity / 2.0 < stopped_velocity;
+  }
+
+  // Check if TOF sensor detects wall too close (safety stop)
+  bool tof_safety_triggered() {
+    if (!is_ground_test) return false;
+    
+    // Check center TOF (primary forward-facing sensor)
+    float center_dist = tof_center.distance * 1000.0;  // Convert to mm
+    if (!isnan(center_dist) && center_dist < tof_safety_distance_mm) {
+      logf("TOF SAFETY: Wall at %.0f mm, stopping test!", center_dist);
+      return true;
+    }
+    return false;
   }
 
   virtual void execute() override {
-    if (state == done) {
+    if (state == complete || state == idle) {
       set_done();
       return;
     }
 
     unsigned long elapsed = millis() - state_start_time;
-    const TestConfig& test = test_sequence[current_test_index];
 
     switch (state) {
       case accelerating:
-        // Wait for velocity to reach target
+        // Ground test safety: abort if approaching wall
+        if (tof_safety_triggered()) {
+          logf("ABORT: TOF safety during acceleration");
+          left_motor.brake(1.0);
+          right_motor.brake(1.0);
+          state = complete;
+          set_done();
+          break;
+        }
+        
         if (at_target_velocity()) {
           logf("Target velocity reached, settling...");
           state = settling;
@@ -2043,66 +2108,96 @@ public:
         }
         break;
 
-      case settling:
-        // Wait for steady state
-        if (elapsed >= settle_time_ms) {
+      case settling: {
+        // Ground test safety: abort if approaching wall
+        if (tof_safety_triggered()) {
+          logf("ABORT: TOF safety during settling");
+          left_motor.brake(1.0);
+          right_motor.brake(1.0);
+          state = complete;
+          set_done();
+          break;
+        }
+        
+        // Ground tests: SKIP settle phase entirely (space is limited)
+        // Rack tests: wait for steady state
+        unsigned long actual_settle_time = is_ground_test ? 0 : settle_time_ms;
+        if (elapsed >= actual_settle_time) {
           logf("Settled, applying test condition");
           apply_test_condition();
           state = testing;
           state_start_time = millis();
         }
         break;
+      }
 
-      case testing:
-        // Record data (happening automatically via ROS messages)
-        if (elapsed >= test_duration_ms) {
-          logf("Test complete, resting...");
-          // Stop motors safely
+      case testing: {
+        // Ground test safety: emergency stop if approaching wall
+        if (tof_safety_triggered()) {
+          logf("ABORT: TOF safety during testing");
+          left_motor.brake(1.0);
+          right_motor.brake(1.0);
+          state = complete;
+          set_done();
+          break;
+        }
+        
+        // Determine test completion
+        unsigned long max_duration = is_ground_test ? ground_test_max_ms : test_duration_ms;
+        bool time_complete = elapsed >= max_duration;
+        
+        // For ground tests: complete early if robot has stopped (no point waiting)
+        bool velocity_complete = is_ground_test && is_stopped() && elapsed > 200;  // Min 200ms of data
+        
+        if (time_complete || velocity_complete) {
+          if (velocity_complete) {
+            logf("Test complete (velocity-based, %.1fs)", elapsed / 1000.0);
+          } else {
+            logf("Test complete (time-based)");
+          }
           left_motor.go(0.0);
           right_motor.go(0.0);
-          state = resting;
-          state_start_time = millis();
+          state = complete;
+          set_done();
         }
         break;
+      }
 
-      case resting:
-        // Rest between trials
-        if (elapsed >= rest_time_ms) {
-          current_test_index++;
-          start_next_test();
-        }
-        break;
-
-      case done:
+      case idle:
+      case complete:
         set_done();
         break;
     }
   }
 
   virtual void end() override {
-    logf("Force Characterization Mode end - %d tests completed", current_test_index);
+    logf("Force test end");
     disable_twist_control();
     left_motor.go(0.0);
     right_motor.go(0.0);
+    // Reset for next test
+    test_type = none;
+    state = idle;
+    is_ground_test = false;
   }
 
   virtual void get_display_string(char * buffer, int buffer_size) override {
-    const char* test_names[] = {"ReducePWM", "Coast", "PropBrake", "PureBrake", "Reverse"};
-    const char* state_names[] = {"Accel", "Settle", "Test", "Rest", "Done"};
-    
-    if (current_test_index < test_sequence.size()) {
-      const TestConfig& test = test_sequence[current_test_index];
-      snprintf(buffer, buffer_size, "FC:%s %s %d/%d", 
-               state_names[state],
-               test_names[test.type],
-               current_test_index + 1,
-               (int)test_sequence.size());
-    } else {
-      snprintf(buffer, buffer_size, "FC: Complete");
-    }
+    const char* mode_names[] = {"RedPWM", "Coast", "PropBrk", "PureBrk", "Rev", "None"};
+    snprintf(buffer, buffer_size, "FC:%s %.1f", 
+             get_state_string(), target_velocity);
   }
 
 } force_char_mode;
+
+// Implementation of forward-declared function for command handler
+bool configure_force_test(const char* mode_str, float velocity, float param) {
+  return force_char_mode.configure_test(mode_str, velocity, param);
+}
+
+// Implementation of forward-declared function for setting ground mode
+void set_force_char_ground_mode(bool ground) {
+  force_char_mode.set_ground_mode(ground);
+}
 
 
 /*
@@ -2475,10 +2570,11 @@ std::vector<Fsm::Edge> edges = {
     Fsm::Edge("open-loop", "rc-moved", "hand"),
     
     // Force characterization mode (rack and ground)
-    //Fsm::Edge("hand", "force-char-rack", "force-char"),
-    //Fsm::Edge("hand", "force-char-ground", "force-char"),
+    Fsm::Edge("hand", "force-char-rack", "force-char"),
+    Fsm::Edge("hand", "force-char-ground", "force-char"),
     Fsm::Edge("force-char", "done", "hand"),
     Fsm::Edge("force-char", "rc-moved", "hand"),
+    Fsm::Edge("force-char", "hand", "hand"),  // Allow explicit return to hand
     
     Fsm::Edge("*", "off", "off"),
 };
@@ -2608,15 +2704,33 @@ void ros_thread(void *arg) {
         delay(1000);
       }
     }
-    // make sure ros is still connected
-    const int timout_ms = 100;
-    if (rmw_uros_ping_agent(timout_ms, 10) != RMW_RET_OK) {
+    // Check WiFi before pinging ROS agent (UDP crashes if WiFi is disconnected)
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.printf("WiFi disconnected, marking ROS as not ready\n");
       ros_ready = false;
-      Serial.printf("Lost connection to ROS agent\n");
-      Serial.printf("Shutting down rclc_support\n");
       destroy_ros_node_and_publishers();
       rclc_support_fini(&support);
-      Serial.printf("rclc_support shut down\n");
+      // Wait for WiFi to reconnect
+      while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+      }
+      Serial.printf("WiFi reconnected\n");
+      continue;
+    }
+
+    // Ping agent less frequently (once per second) to reduce latency for publishing
+    static unsigned long last_ping_ms = 0;
+    if (millis() - last_ping_ms > 1000) {
+      last_ping_ms = millis();
+      const int timeout_ms = 100;
+      if (rmw_uros_ping_agent(timeout_ms, 2) != RMW_RET_OK) {
+        ros_ready = false;
+        Serial.printf("Lost connection to ROS agent\n");
+        Serial.printf("Shutting down rclc_support\n");
+        destroy_ros_node_and_publishers();
+        rclc_support_fini(&support);
+        Serial.printf("rclc_support shut down\n");
+      }
     }
 
     // spin executor to process subscriptions
@@ -2624,7 +2738,38 @@ void ros_thread(void *arg) {
       rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
     }
 
-    delay(100); // sleep to allow other tasks to run
+    // Publish all pending messages (all ROS transport in this thread - no race conditions)
+    if (ros_ready) {
+      if (update_msg_pending) {
+        RCSOFTCHECK(rcl_publish(&update_publisher, &update_msg, NULL));
+        update_msg_pending = false;
+      }
+      if (battery_msg_pending) {
+        RCSOFTCHECK(rcl_publish(&battery_publisher, &battery_msg, NULL));
+        battery_msg_pending = false;
+      }
+      if (nav_sat_fix_msg_pending) {
+        RCSOFTCHECK(rcl_publish(&nav_sat_fix_publisher, &nav_sat_fix_msg, NULL));
+        nav_sat_fix_msg_pending = false;
+      }
+      if (log_msg_pending) {
+        RCSOFTCHECK(rcl_publish(&log_publisher, &log_msg, NULL));
+        log_msg_pending = false;
+      }
+      if (rosout_msg_pending) {
+        RCSOFTCHECK(rcl_publish(&rosout_publisher, &rosout_msg, NULL));
+        rosout_msg_pending = false;
+      }
+      // Publish pending TOF messages
+      for (auto tof : tof_sensors) {
+        if (tof->pending) {
+          RCSOFTCHECK(rcl_publish(&(tof->publisher), &(tof->pending_msg), NULL));
+          tof->pending = false;
+        }
+      }
+    }
+
+    delay(10); // faster loop to reduce publish latency
   }
 }
 
@@ -3218,62 +3363,62 @@ void loop() {
   bool every_minute = every_n_ms(last_loop_time_ms, loop_time_ms, 60 * 1000);
 
   if (every_100_ms) {
-    left_speedometer.update_from_sensor(micros(), left_encoder.odometer_a, left_encoder.last_odometer_a_us, left_encoder.odometer_b, left_encoder.last_odometer_b_us);
-    right_speedometer.update_from_sensor(micros(), right_encoder.odometer_a, right_encoder.last_odometer_a_us, right_encoder.odometer_b, right_encoder.last_odometer_b_us);
+    if (ros_ready && !update_msg_pending) {
+      left_speedometer.update_from_sensor(micros(), left_encoder.odometer_a, left_encoder.last_odometer_a_us, left_encoder.odometer_b, left_encoder.last_odometer_b_us);
+      right_speedometer.update_from_sensor(micros(), right_encoder.odometer_a, right_encoder.last_odometer_a_us, right_encoder.odometer_b, right_encoder.last_odometer_b_us);
 
-    update_msg.battery_voltage = v_bat;
-    update_msg.left_speed = left_speedometer.get_velocity();
-    update_msg.right_speed = right_speedometer.get_velocity();
-    update_msg.left_motor_command = left_motor.get_setpoint();
-    update_msg.left_odometer_ticks = left_encoder.odometer_a;
-    update_msg.right_odometer_ticks=right_encoder.odometer_a;
-    update_msg.right_motor_command = right_motor.get_setpoint();
-    update_msg.rx_esc = crsf_ns::crsf_rc_channel_to_float(rx_esc);
-    update_msg.rx_str = crsf_ns::crsf_rc_channel_to_float(rx_str);
-    
-    // Read compass and BNO data with mutex protection (compass.last_reading written in i2c_sensor_thread)
-    xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
-    // Compute azimuth from cached compass reading instead of calling get_azimuth_degrees() which might do I2C
-    update_msg.yaw_degrees = compass.get_azimuth_degrees();
-    update_msg.mag_x = compass.last_reading.x;
-    update_msg.mag_y = compass.last_reading.y;
-    update_msg.mag_z = compass.last_reading.z;
-    update_msg.bno_yaw_degrees = compass_heading_degrees;
-    update_msg.bno_pitch_degrees = bno_orientation_degrees.y();
-    update_msg.bno_roll_degrees = bno_orientation_degrees.z();
-    update_msg.bno_acceleration_x = bno_acceleration.x();
-    update_msg.bno_acceleration_y = bno_acceleration.y();
-    update_msg.bno_acceleration_z = bno_acceleration.z();
-    update_msg.bno_gyro_x = bno_gyro_dps.x();
-    update_msg.bno_gyro_y = bno_gyro_dps.y();
-    update_msg.bno_gyro_z = bno_gyro_dps.z();
-    update_msg.bno_mag_x = bno_mag.x();
-    update_msg.bno_mag_y = bno_mag.y();
-    update_msg.bno_mag_z = bno_mag.z();
-    xSemaphoreGive(sensor_data_mutex);
-
-    // Populate twist control targets (NAN if not in twist control mode)
-    if (twist_control_enabled) {
-      update_msg.twist_target_linear = twist_target_linear;
-      update_msg.twist_target_angular = twist_target_angular;
-      update_msg.twist_target_accel_linear = twist_target_accel_linear;
-      update_msg.twist_target_accel_angular = twist_target_accel_angular;
+      update_msg.battery_voltage = v_bat;
+      update_msg.left_speed = left_speedometer.get_velocity();
+      update_msg.right_speed = right_speedometer.get_velocity();
+      update_msg.left_motor_command = left_motor.get_setpoint();
+      update_msg.left_odometer_ticks = left_encoder.odometer_a;
+      update_msg.right_odometer_ticks=right_encoder.odometer_a;
+      update_msg.right_motor_command = right_motor.get_setpoint();
+      update_msg.rx_esc = crsf_ns::crsf_rc_channel_to_float(rx_esc);
+      update_msg.rx_str = crsf_ns::crsf_rc_channel_to_float(rx_str);
       
-      // Use the effective (ramped) targets that were actually sent to the controllers
-      update_msg.v_left_target = v_left_target_effective;
-      update_msg.v_right_target = v_right_target_effective;
-    } else {
-      update_msg.twist_target_linear = NAN;
-      update_msg.twist_target_angular = NAN;
-      update_msg.twist_target_accel_linear = NAN;
-      update_msg.twist_target_accel_angular = NAN;
-      update_msg.v_left_target = NAN;
-      update_msg.v_right_target = NAN;
-    }
+      // Read compass and BNO data with mutex protection (compass.last_reading written in i2c_sensor_thread)
+      xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
+      // Compute azimuth from cached compass reading instead of calling get_azimuth_degrees() which might do I2C
+      update_msg.yaw_degrees = compass.get_azimuth_degrees();
+      update_msg.mag_x = compass.last_reading.x;
+      update_msg.mag_y = compass.last_reading.y;
+      update_msg.mag_z = compass.last_reading.z;
+      update_msg.bno_yaw_degrees = compass_heading_degrees;
+      update_msg.bno_pitch_degrees = bno_orientation_degrees.y();
+      update_msg.bno_roll_degrees = bno_orientation_degrees.z();
+      update_msg.bno_acceleration_x = bno_acceleration.x();
+      update_msg.bno_acceleration_y = bno_acceleration.y();
+      update_msg.bno_acceleration_z = bno_acceleration.z();
+      update_msg.bno_gyro_x = bno_gyro_dps.x();
+      update_msg.bno_gyro_y = bno_gyro_dps.y();
+      update_msg.bno_gyro_z = bno_gyro_dps.z();
+      update_msg.bno_mag_x = bno_mag.x();
+      update_msg.bno_mag_y = bno_mag.y();
+      update_msg.bno_mag_z = bno_mag.z();
+      xSemaphoreGive(sensor_data_mutex);
 
-    if (ros_ready) {
-      // publish update message
-      RCSOFTCHECK(rcl_publish(&update_publisher, &update_msg, NULL));
+      // Populate twist control targets (NAN if not in twist control mode)
+      if (twist_control_enabled) {
+        update_msg.twist_target_linear = twist_target_linear;
+        update_msg.twist_target_angular = twist_target_angular;
+        update_msg.twist_target_accel_linear = twist_target_accel_linear;
+        update_msg.twist_target_accel_angular = twist_target_accel_angular;
+        
+        // Use the effective (ramped) targets that were actually sent to the controllers
+        update_msg.v_left_target = v_left_target_effective;
+        update_msg.v_right_target = v_right_target_effective;
+      } else {
+        update_msg.twist_target_linear = NAN;
+        update_msg.twist_target_angular = NAN;
+        update_msg.twist_target_accel_linear = NAN;
+        update_msg.twist_target_accel_angular = NAN;
+        update_msg.v_left_target = NAN;
+        update_msg.v_right_target = NAN;
+      }
+
+    // Mark pending for ros_thread to publish
+      update_msg_pending = true;
     }
   }
 
@@ -3300,7 +3445,7 @@ void loop() {
   if (every_n_ms(last_loop_time_ms, loop_time_ms, tof_timing_budget_ms)) {
     BlockTimer bt(tof_distance_stats);  // Measure TOF publishing time
     for (auto tof : tof_sensors) {
-      if (ros_ready)
+      if (ros_ready && !tof->pending)
       {
         // Read TOF distance with mutex protection
         float tof_distance;
@@ -3308,17 +3453,17 @@ void loop() {
         tof_distance = tof->distance;
         xSemaphoreGive(sensor_data_mutex);
         
-        set_stamp(tof_distance_msg.header.stamp);
-        tof_distance_msg.range = tof_distance;
-        if (tof_distance_msg.radiation_type != sensor_msgs__msg__Range__INFRARED) {
-          logf( 
-            Severity::ERROR, 
-            "tof_distance_msg.radiation_type != sensor_msgs__msg__Range__INFRARED, value: %d", 
-            tof_distance_msg.radiation_type);
-          
-          tof_distance_msg.radiation_type = sensor_msgs__msg__Range__INFRARED;
-        }    
-        RCSOFTCHECK(rcl_publish(&(tof->publisher), &tof_distance_msg, NULL));
+        // Fill the per-sensor pending message
+        set_stamp(tof->pending_msg.header.stamp);
+        tof->pending_msg.range = tof_distance;
+        tof->pending_msg.radiation_type = sensor_msgs__msg__Range__INFRARED;
+        tof->pending_msg.min_range = tof_distance_msg.min_range;
+        tof->pending_msg.max_range = tof_distance_msg.max_range;
+        tof->pending_msg.field_of_view = tof_distance_msg.field_of_view;
+        tof->pending_msg.header.frame_id = tof_distance_msg.header.frame_id;
+        
+        // Mark pending for ros_thread to publish
+        tof->pending = true;
       }    
     }
   }
@@ -3401,10 +3546,10 @@ if (use_gnss && every_100_ms) {
     nav_sat_fix_msg.altitude = gnss.getAltitude(0) * 1e-3;
   }
 
-  // publish nav_sat_fix message
-  if (ros_ready) {
+  // Mark pending for ros_thread to publish
+  if (ros_ready && !nav_sat_fix_msg_pending) {
     set_stamp(nav_sat_fix_msg.header.stamp);
-    RCSOFTCHECK(rcl_publish(&nav_sat_fix_publisher, &nav_sat_fix_msg, NULL));
+    nav_sat_fix_msg_pending = true;
   }
 
 };  
@@ -3433,8 +3578,9 @@ if (use_gnss && every_minute) {
   }
 
   if (every_1000_ms) {
-    if (ros_ready) {
-      RCSOFTCHECK(rcl_publish(&battery_publisher, &battery_msg, NULL));
+    // Mark pending for ros_thread to publish
+    if (ros_ready && !battery_msg_pending) {
+      battery_msg_pending = true;
     }
   }
 

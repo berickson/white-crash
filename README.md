@@ -18,10 +18,27 @@ This is for a 3d printed treaded rover robot built with low cost components. It 
 
 # Running
 
-Launch micro-ros-agent:
+Launch micro-ros-agent (patched version - see [agent_crash_investigation.md](agent_crash_investigation.md)):
+
+```bash
+# From distrobox with ROS 2 Jazzy
+distrobox enter jazzy
+~/projects/Micro-XRCE-DDS-Agent/build/MicroXRCEAgent udp4 --port 8888 -v3
+```
+
+Or use Docker (unpatched - may crash on malformed packets):
 
 ```bash
 docker run -it --rm -v /dev:/dev -v /dev/shm:/dev/shm --privileged --net=host microros/micro-ros-agent:jazzy udp4 --port 8888 -v3
+```
+
+## Building Patched Agent
+
+```bash
+cd ~/projects/Micro-XRCE-DDS-Agent
+mkdir build && cd build
+cmake ..
+make -j$(nproc)
 ```
 
 View log messages (note qos-depth):
@@ -34,7 +51,7 @@ Run Foxglove Bridge
 
 ```bash
 cd
-distrobox enter humble
+distrobox enter jazzy
 ~/projects/white-crash/ws
 source install/setup.bash
 #source /opt/ros/humble/setup.bash

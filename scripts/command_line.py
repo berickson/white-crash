@@ -11,6 +11,15 @@ from std_msgs.msg import String
 import sys
 import threading
 
+# Enable command history with up/down arrows
+try:
+    import readline
+    # Enable history
+    readline.parse_and_bind('tab: complete')
+    readline.parse_and_bind('set editing-mode emacs')
+except ImportError:
+    pass  # readline not available on all platforms
+
 
 class ReplClient(Node):
     def __init__(self):
