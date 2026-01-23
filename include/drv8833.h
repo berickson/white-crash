@@ -60,6 +60,7 @@ class DRV8833 {
         // Use brake(1.0) for position holding when stopped
         void brake(float intensity) {
             intensity = clamp(intensity, 0.0f, 1.0f);
+            setpoint = intensity;  // Store for get_setpoint() telemetry
             
             if (intensity <= 0.0) {
                 coast();

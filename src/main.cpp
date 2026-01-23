@@ -1271,6 +1271,11 @@ class PIController {
 PIController left_wheel_controller;
 PIController right_wheel_controller;
 
+// Motor mode tracking for telemetry
+// 0=coast, 1=forward PWM, 2=brake
+int left_motor_mode = 0;
+int right_motor_mode = 0;
+
 // Acceleration limits for internal ramping (Phase 3B)
 const float max_linear_accel = 1.0;  // m/s² - maximum linear acceleration
 const float max_angular_accel = 2.0; // rad/s² - maximum angular acceleration
@@ -1670,22 +1675,18 @@ void update_twist_control() {
   //   1. Explicit negative acceleration is commanded (accel < 0)
   //   2. AND that deceleration exceeds what coast friction provides
   //
-  // TODO: Handle case where accel_target==0 but v_target=0 and v_actual>>0
-  //       (e.g., cmd_vel=0 while moving). Should probably brake hard, not coast.
-  //       For now, position controller must explicitly command deceleration.
-  //
   // If accel_target == 0, PI controller handles velocity tracking with natural coast.
   
   // Left wheel
   bool use_brake_left = false;
   float brake_intensity_left = 0.0f;
   
-  if (accel_left < 0 && fabs(v_left_actual) > 0.02f) {
+  if (accel_left < -0.1f && fabs(v_left_actual) > 0.02f) {
     // Explicit deceleration commanded - check if we need active braking
     float desired_decel = -accel_left;
     float coast_decel = coast_model.c0 + coast_model.c1 * fabs(v_left_actual);
     
-    if (desired_decel > coast_decel) {
+    if (desired_decel > coast_decel * 0.9f) {  // Use 90% threshold for hysteresis
       // Need more braking than coast provides
       brake_intensity_left = compute_brake_intensity(desired_decel, v_left_actual);
       use_brake_left = (brake_intensity_left >= 0);
@@ -1696,31 +1697,51 @@ void update_twist_control() {
   bool use_brake_right = false;
   float brake_intensity_right = 0.0f;
   
-  if (accel_right < 0 && fabs(v_right_actual) > 0.02f) {
+  if (accel_right < -0.1f && fabs(v_right_actual) > 0.02f) {
     // Explicit deceleration commanded - check if we need active braking
     float desired_decel = -accel_right;
     float coast_decel = coast_model.c0 + coast_model.c1 * fabs(v_right_actual);
     
-    if (desired_decel > coast_decel) {
+    if (desired_decel > coast_decel * 0.9f) {  // Use 90% threshold for hysteresis
       // Need more braking than coast provides
       brake_intensity_right = compute_brake_intensity(desired_decel, v_right_actual);
       use_brake_right = (brake_intensity_right >= 0);
     }
   }
+  
+  // Debug logging for brake decisions (every 500ms when decelerating)
+  static unsigned long last_brake_debug = 0;
+  if ((accel_left < -0.1f || accel_right < -0.1f) && millis() - last_brake_debug > 500) {
+    logf("BRAKE: a_L=%.2f a_R=%.2f v_L=%.2f v_R=%.2f brake_L=%d(%.2f) brake_R=%d(%.2f)",
+         accel_left, accel_right, v_left_actual, v_right_actual,
+         use_brake_left, brake_intensity_left, use_brake_right, brake_intensity_right);
+    last_brake_debug = millis();
+  }
 
-  // Apply motor commands
+  // Apply motor commands and track mode for telemetry
+  // motor_command (from get_setpoint) will reflect the value passed to go() or brake()
   if (use_brake_left) {
-    left_motor.brake(constrain(brake_intensity_left, 0.0f, 1.0f));
+    float intensity = constrain(brake_intensity_left, 0.0f, 1.0f);
+    left_motor.brake(intensity);  // setpoint = intensity
+    left_motor_mode = 2;  // brake mode
+    // Reset PI integrator to prevent windup during braking
+    left_wheel_controller.reset();
   } else {
     // Use PI controller output (handles accel, maintain, and gentle decel)
-    left_motor.go(pwm_left, false);
+    left_motor.go(pwm_left, false);  // setpoint = pwm_left
+    left_motor_mode = (fabs(pwm_left) > 0.01f) ? 1 : 0;  // forward/reverse or coast
   }
   
   if (use_brake_right) {
-    right_motor.brake(constrain(brake_intensity_right, 0.0f, 1.0f));
+    float intensity = constrain(brake_intensity_right, 0.0f, 1.0f);
+    right_motor.brake(intensity);  // setpoint = intensity
+    right_motor_mode = 2;  // brake mode
+    // Reset PI integrator to prevent windup during braking
+    right_wheel_controller.reset();
   } else {
     // Use PI controller output (handles accel, maintain, and gentle decel)
-    right_motor.go(pwm_right, false);
+    right_motor.go(pwm_right, false);  // setpoint = pwm_right
+    right_motor_mode = (fabs(pwm_right) > 0.01f) ? 1 : 0;  // forward/reverse or coast
   }
 }
 
@@ -3905,6 +3926,10 @@ void loop() {
         // Use the effective (ramped) targets that were actually sent to the controllers
         update_msg.v_left_target = v_left_target_effective;
         update_msg.v_right_target = v_right_target_effective;
+        
+        // Motor mode telemetry (motor_command contains value, mode tells interpretation)
+        update_msg.left_motor_mode = left_motor_mode;
+        update_msg.right_motor_mode = right_motor_mode;
       } else {
         update_msg.twist_target_linear = NAN;
         update_msg.twist_target_angular = NAN;
@@ -3912,6 +3937,8 @@ void loop() {
         update_msg.twist_target_accel_angular = NAN;
         update_msg.v_left_target = NAN;
         update_msg.v_right_target = NAN;
+        update_msg.left_motor_mode = 0;
+        update_msg.right_motor_mode = 0;
       }
 
     // Mark pending for ros_thread to publish

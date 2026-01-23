@@ -170,6 +170,10 @@ class WallApproachTestClient(Node):
                 'left_motor_command': msg.left_motor_command,
                 'right_motor_command': msg.right_motor_command,
                 'battery_voltage': msg.battery_voltage,
+                # Motor mode telemetry (0=coast, 1=forward/reverse PWM, 2=brake)
+                # When mode=2, motor_command holds the brake intensity [0,1]
+                'left_motor_mode': msg.left_motor_mode,
+                'right_motor_mode': msg.right_motor_mode,
             })
             
     def send_command(self, command_text, timeout=3.0, retries=2):

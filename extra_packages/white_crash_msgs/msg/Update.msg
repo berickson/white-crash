@@ -29,3 +29,11 @@ float32 twist_target_accel_linear   # Commanded linear acceleration (m/s²) - NA
 float32 twist_target_accel_angular  # Commanded angular acceleration (rad/s²) - NAN if not in twist control
 float32 v_left_target               # Commanded left wheel velocity (m/s) - NAN if not in twist control
 float32 v_right_target              # Commanded right wheel velocity (m/s) - NAN if not in twist control
+
+# Motor control mode (for diagnostics)
+# motor_command meaning depends on mode:
+#   mode=0 (coast): motor_command = 0
+#   mode=1 (forward/reverse PWM): motor_command = PWM value [-1, 1]
+#   mode=2 (brake): motor_command = brake intensity [0, 1]
+uint8 left_motor_mode
+uint8 right_motor_mode
