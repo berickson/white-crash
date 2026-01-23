@@ -37,6 +37,39 @@ from datetime import datetime
 import sys
 import threading
 import yaml
+import os
+from pathlib import Path
+
+
+# Global variable to hold the output directory for the current run
+_run_output_dir = None
+
+
+def get_output_dir(timestamp=None, create=True):
+    """Get the output directory for this run, creating if needed.
+    
+    Returns path like: test_outputs/run_2026_01_22_15_30_45/
+    """
+    global _run_output_dir
+    
+    if _run_output_dir is None:
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+        
+        # Get script directory and construct path to test_outputs
+        script_dir = Path(__file__).parent.parent  # Go up from scripts/ to project root
+        _run_output_dir = script_dir / "test_outputs" / f"run_{timestamp}"
+        
+        if create:
+            _run_output_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Output directory: {_run_output_dir}")
+    
+    return _run_output_dir
+
+
+def output_path(filename):
+    """Get full path for an output file in the current run's directory."""
+    return str(get_output_dir() / filename)
 
 
 from rcl_interfaces.msg import Log
@@ -81,7 +114,7 @@ class ForceTestClient(Node):
         # Subscriber for rosout (robot log messages)
         self.rosout_sub = self.create_subscription(
             Log,
-            '/rosout',
+            '/rosout_best_effort',
             self.rosout_callback,
             qos_profile
         )
@@ -190,26 +223,44 @@ class ForceTestClient(Node):
         else:
             self.get_logger().info(f"  Event response: {response}")
         
-        # Wait for test to complete (accel + settle + test = ~9 seconds typical)
-        # Add buffer for safety
-        max_wait = 15.0
+        # Wait for test to complete
+        # Detection: motor commands going to 0 indicates robot ended test
+        # EXCEPT for coast tests where cmd=0 IS the test condition!
+        # Ground tests are shorter (max ~2-3s), rack tests ~9s
+        max_wait = 10.0 if self.stage == 'ground' else 15.0
         start = time.time()
         got_velocity = False  # Track if we ever reached meaningful velocity
+        motors_were_active = False  # Track if motors were ever commanded
+        is_coast_test = (mode == 'coast')
         
         while time.time() - start < max_wait:
-            time.sleep(0.5)
+            time.sleep(0.1)  # Poll faster for quicker detection
             
-            if len(self.current_test_data) > 10:
-                recent = self.current_test_data[-10:]
+            if len(self.current_test_data) > 5:
+                recent = self.current_test_data[-5:]
                 avg_speed = sum(d['left_speed'] + d['right_speed'] for d in recent) / (2 * len(recent))
+                avg_cmd = sum(abs(d['left_motor_command']) + abs(d['right_motor_command']) for d in recent) / (2 * len(recent))
+                
+                # Track if motors were ever commanded (either PWM or braking)
+                if avg_cmd > 0.1:
+                    motors_were_active = True
                 
                 # Mark that we reached target velocity (within tolerance)
                 if avg_speed > velocity * 0.7:
                     got_velocity = True
                 
-                # Only check for stop AFTER we've reached velocity
+                # Detection 1: Reached velocity and now stopped (normal completion)
+                # This works for all test types including coast
                 if got_velocity and avg_speed < 0.05:
-                    time.sleep(0.5)  # Capture a bit more
+                    time.sleep(0.2)  # Brief capture of stopped state
+                    break
+                
+                # Detection 2: Motors were active but now both commands are ~0
+                # This catches robot ending test early (TOF safety, etc.)
+                # BUT NOT for coast tests - cmd=0 is the test condition, not the end!
+                if motors_were_active and avg_cmd < 0.05 and not is_coast_test:
+                    time.sleep(0.2)  # Brief capture
+                    self.get_logger().info("  Detected test end (motor commands → 0)")
                     break
         
         # Stop collecting
@@ -248,23 +299,22 @@ def build_test_sequence(stage='rack'):
     tests = []
     
     if stage == 'ground':
-        # GROUND TESTS: Minimal informative set (~10 tests)
-        # Wall hits are acceptable at these speeds
-        # Note: Pure brake may cause wheel lockup/sliding - detectable via TOF
+        # GROUND TESTS: Informative set for deceleration model fitting
+        # TOF safety at 500mm ensures we stop before wall at higher speeds
         
-        # Test 1-3: Coast at different velocities (friction model)
-        for v in [0.5, 0.7, 1.0]:
+        # Test 1-4: Coast at different velocities (friction model)
+        for v in [0.5, 0.7, 1.0, 2.0]:
             tests.append(('coast', v, 0.0))
         
-        # Test 4-6: Pure brake at different velocities (max braking)
-        for v in [0.5, 0.7, 1.0]:
+        # Test 5-8: Pure brake at different velocities (max braking)
+        for v in [0.5, 0.7, 1.0, 2.0]:
             tests.append(('pure_brake', v, 1.0))
         
-        # Test 7-9: Proportional brake 50% (verify brake linearity)
+        # Test 9-11: Proportional brake 50% (verify brake linearity)
         for v in [0.5, 0.7, 1.0]:
             tests.append(('prop_brake', v, 0.5))
         
-        # Test 10: Proportional brake 25% (one more data point)
+        # Test 12: Proportional brake 25% (one more data point)
         tests.append(('prop_brake', 0.7, 0.25))
         
     else:
@@ -352,7 +402,7 @@ def run_test_suite(stage='rack'):
             if result and result.get('valid', False):
                 all_results.append(result)
                 # Save incrementally (in case of crash)
-                temp_file = f"force_char_progress_{stage}.pkl"
+                temp_file = output_path(f"force_char_progress_{stage}.pkl")
                 with open(temp_file, 'wb') as f:
                     pickle.dump({'stage': stage, 'results': all_results}, f)
                 print(f"  ✓ Valid test, saved progress ({len(all_results)} good tests)")
@@ -388,7 +438,7 @@ def run_test_suite(stage='rack'):
                     
                     if result and result.get('valid', False):
                         all_results.append(result)
-                        temp_file = f"force_char_progress_{stage}.pkl"
+                        temp_file = output_path(f"force_char_progress_{stage}.pkl")
                         with open(temp_file, 'wb') as f:
                             pickle.dump({'stage': stage, 'results': all_results}, f)
                         print(f"    ✓ Retry succeeded!")
@@ -404,7 +454,7 @@ def run_test_suite(stage='rack'):
         
         # Save final results
         timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-        data_file = f"force_char_data_{timestamp}.pkl"
+        data_file = output_path(f"force_char_data_{timestamp}.pkl")
         with open(data_file, 'wb') as f:
             pickle.dump({'stage': stage, 'results': all_results, 'timestamp': timestamp}, f)
         print(f"Data saved to: {data_file}")
@@ -414,7 +464,7 @@ def run_test_suite(stage='rack'):
     except KeyboardInterrupt:
         print("\n\nTest interrupted by user")
         timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-        data_file = f"force_char_data_{timestamp}_interrupted.pkl"
+        data_file = output_path(f"force_char_data_{timestamp}_interrupted.pkl")
         with open(data_file, 'wb') as f:
             pickle.dump({'stage': stage, 'results': all_results, 'timestamp': timestamp}, f)
         print(f"Partial data saved to: {data_file}")
@@ -457,9 +507,10 @@ def run_single_test(mode, velocity, param):
                 plt.ylabel('Velocity (m/s)')
                 plt.title(f'{mode} @ {velocity} m/s, param={param}')
                 plt.grid(True, alpha=0.3)
-                plt.savefig(f'single_test_{mode}_{velocity}_{param}.png')
+                plot_file = output_path(f'single_test_{mode}_{velocity}_{param}.png')
+                plt.savefig(plot_file)
                 plt.show()
-                print(f"Plot saved to: single_test_{mode}_{velocity}_{param}.png")
+                print(f"Plot saved to: {plot_file}")
         else:
             print("Test failed!")
             
@@ -503,9 +554,15 @@ class ForceCharacterizationAnalyzer:
         decel_t = t[peak_idx:] - t[peak_idx]
         
         # Compute deceleration if enough data
-        if len(decel_data) > 10:
+        if len(decel_data) > 3:
             try:
-                v_smooth = savgol_filter(decel_data, min(11, len(decel_data)//2*2+1), 3)
+                # For short datasets, use smaller window or skip smoothing
+                if len(decel_data) > 10:
+                    window = min(11, len(decel_data)//2*2+1)
+                    v_smooth = savgol_filter(decel_data, window, min(3, window-1))
+                else:
+                    # Simple smoothing for short data
+                    v_smooth = decel_data
                 dt = np.diff(decel_t)
                 dv = np.diff(v_smooth)
                 deceleration = dv / np.where(dt > 0, dt, 1e-6)
@@ -615,6 +672,141 @@ class ForceCharacterizationAnalyzer:
         
         print(f"Summary exported to {output_yaml}")
 
+    def fit_force_models(self):
+        """
+        Fit physics models to the deceleration data.
+        
+        Returns dict with fitted parameters for each mode:
+        - coast: decel = c0 + c1*v (friction)
+        - pure_brake: decel = b0 + b1*v (max braking)
+        - prop_brake: decel at various duty cycles
+        """
+        models = {
+            'metadata': {
+                'stage': self.stage,
+                'timestamp': self.data_dict.get('timestamp', 'unknown'),
+                'description': 'Fitted deceleration models: decel = c0 + c1*v (m/s^2)',
+            }
+        }
+        
+        # Group results by mode
+        by_mode = {}
+        for result in self.results:
+            mode = result['mode']
+            if mode not in by_mode:
+                by_mode[mode] = []
+            by_mode[mode].append(result)
+        
+        # Collect velocity-deceleration pairs for each mode
+        def extract_decel_data(results):
+            """Extract (velocity, deceleration) pairs from results"""
+            all_v = []
+            all_decel = []
+            
+            for result in results:
+                analysis = self.analyze_trial(result)
+                if analysis is None:
+                    continue
+                    
+                decel_v = analysis['decel_v']
+                deceleration = analysis['deceleration']
+                
+                if len(deceleration) < 3:
+                    continue
+                
+                # Use velocity at midpoint of each deceleration interval
+                v_mid = (decel_v[:-1] + decel_v[1:]) / 2
+                
+                # Filter out noise: only use points where velocity > 0.05 and decel is reasonable
+                for v, d in zip(v_mid[:len(deceleration)], deceleration):
+                    if v > 0.05 and abs(d) < 50:  # Filter extreme values
+                        all_v.append(v)
+                        all_decel.append(-d)  # Positive deceleration = slowing down
+            
+            return np.array(all_v), np.array(all_decel)
+        
+        # Linear model: decel = c0 + c1*v
+        def linear_model(v, c0, c1):
+            return c0 + c1 * v
+        
+        # Fit coast model (friction)
+        if 'coast' in by_mode:
+            v_data, decel_data = extract_decel_data(by_mode['coast'])
+            if len(v_data) > 5:
+                try:
+                    popt, pcov = curve_fit(linear_model, v_data, decel_data, 
+                                          p0=[0.5, 1.0], maxfev=5000)
+                    models['coast'] = {
+                        'c0': float(popt[0]),
+                        'c1': float(popt[1]),
+                        'description': 'Coast friction: decel = c0 + c1*v',
+                        'num_points': len(v_data),
+                        'v_range': [float(v_data.min()), float(v_data.max())],
+                    }
+                    print(f"Coast model: decel = {popt[0]:.3f} + {popt[1]:.3f}*v")
+                except Exception as e:
+                    print(f"Warning: Could not fit coast model: {e}")
+        
+        # Fit pure_brake model (max braking)
+        if 'pure_brake' in by_mode:
+            v_data, decel_data = extract_decel_data(by_mode['pure_brake'])
+            if len(v_data) > 5:
+                try:
+                    popt, pcov = curve_fit(linear_model, v_data, decel_data,
+                                          p0=[1.0, 2.0], maxfev=5000)
+                    models['pure_brake'] = {
+                        'b0': float(popt[0]),
+                        'b1': float(popt[1]),
+                        'description': 'Pure brake: decel = b0 + b1*v',
+                        'num_points': len(v_data),
+                        'v_range': [float(v_data.min()), float(v_data.max())],
+                    }
+                    print(f"Pure brake model: decel = {popt[0]:.3f} + {popt[1]:.3f}*v")
+                except Exception as e:
+                    print(f"Warning: Could not fit pure_brake model: {e}")
+        
+        # Fit prop_brake models (one per duty cycle)
+        if 'prop_brake' in by_mode:
+            # Group by param (duty cycle)
+            by_duty = {}
+            for result in by_mode['prop_brake']:
+                duty = result['param']
+                if duty not in by_duty:
+                    by_duty[duty] = []
+                by_duty[duty].append(result)
+            
+            models['prop_brake'] = {
+                'description': 'Proportional brake at various duty cycles',
+                'duty_cycles': {}
+            }
+            
+            for duty, results in sorted(by_duty.items()):
+                v_data, decel_data = extract_decel_data(results)
+                if len(v_data) > 3:
+                    try:
+                        popt, pcov = curve_fit(linear_model, v_data, decel_data,
+                                              p0=[0.5, 1.0], maxfev=5000)
+                        models['prop_brake']['duty_cycles'][f'duty_{int(duty*100)}'] = {
+                            'c0': float(popt[0]),
+                            'c1': float(popt[1]),
+                            'num_points': len(v_data),
+                        }
+                        print(f"Prop brake {int(duty*100)}%: decel = {popt[0]:.3f} + {popt[1]:.3f}*v")
+                    except Exception as e:
+                        print(f"Warning: Could not fit prop_brake {duty}: {e}")
+        
+        return models
+    
+    def export_force_models(self, output_yaml):
+        """Fit models and export to YAML file"""
+        print(f"\nFitting force models...")
+        models = self.fit_force_models()
+        
+        with open(output_yaml, 'w') as f:
+            yaml.dump(models, f, default_flow_style=False)
+        
+        print(f"Force models exported to {output_yaml}")
+
 
 def analyze_data(data_file):
     """Analyze existing data file"""
@@ -627,17 +819,22 @@ def analyze_data(data_file):
     timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
     
     # Generate report
-    report_pdf = f"force_char_report_{timestamp}.pdf"
+    report_pdf = output_path(f"force_char_report_{timestamp}.pdf")
     analyzer.generate_report(report_pdf)
     
     # Export summary
-    summary_yaml = f"force_char_summary_{timestamp}.yaml"
+    summary_yaml = output_path(f"force_char_summary_{timestamp}.yaml")
     analyzer.export_summary(summary_yaml)
+    
+    # Fit and export force models
+    models_yaml = output_path(f"force_models_{timestamp}.yaml")
+    analyzer.export_force_models(models_yaml)
     
     print(f"\n{'='*70}")
     print("Analysis complete!")
     print(f"  Report: {report_pdf}")
     print(f"  Summary: {summary_yaml}")
+    print(f"  Force Models: {models_yaml}")
     print(f"{'='*70}\n")
 
 

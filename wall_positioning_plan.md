@@ -12,6 +12,58 @@
 
 ---
 
+## Phase 0 Results: Characterized Force Models ✅ COMPLETE
+
+**Test Date:** January 22, 2026  
+**Test Conditions:** Ground tests, hardwood floor  
+**Data File:** `test_outputs/run_2026_01_22_17_44_16/force_models_2026_01_22_17_44_16.yaml`
+
+### Fitted Deceleration Models
+
+All models follow: `decel = c0 + c1 * v` (m/s²)
+
+| Mode | c0 (m/s²) | c1 (1/s) | Points | Velocity Range |
+|------|-----------|----------|--------|----------------|
+| **Coast** | 0.951 | 0.794 | 26 | 0.05 - 1.63 m/s |
+| **Pure Brake** | 1.008 | 2.950 | 14 | 0.06 - 1.46 m/s |
+| **Prop Brake 25%** | 1.478 | -0.078 | 4 | limited data |
+| **Prop Brake 50%** | 1.140 | 0.280 | 17 | good coverage |
+
+### Key Findings
+
+**At 0.5 m/s:**
+- Coast: 0.95 + 0.79×0.5 = **1.35 m/s²**
+- Pure brake: 1.01 + 2.95×0.5 = **2.49 m/s²**
+- Brake ratio: pure_brake/coast ≈ **1.8x stronger**
+
+**At 1.0 m/s:**
+- Coast: 0.95 + 0.79×1.0 = **1.74 m/s²**
+- Pure brake: 1.01 + 2.95×1.0 = **3.96 m/s²**
+- Brake ratio: pure_brake/coast ≈ **2.3x stronger**
+
+**Stopping Distance (from v to 0):**
+- Using constant decel approximation: `d = v²/(2*decel)`
+- At 0.5 m/s with coast: ~9 cm
+- At 0.5 m/s with pure brake: ~5 cm
+- At 1.0 m/s with coast: ~29 cm
+- At 1.0 m/s with pure brake: ~13 cm
+
+### Implications for Control
+
+1. **Proportional braking gives fine-grained deceleration control**
+   - Can interpolate between coast (intensity=0) and pure_brake (intensity=1)
+   - At v=0.5: decel range is 1.35 to 2.49 m/s² (1.14 m/s² of control authority)
+
+2. **Velocity-dependent braking is significant**
+   - Pure brake c1=2.95 means higher speeds brake much harder
+   - This is good for safety but requires model-based control
+
+3. **Current twist control doesn't use proportional braking**
+   - Uses fast_decay (reverse PWM) which is different physics
+   - Need to enhance twist control to use characterized brake models
+
+---
+
 ## Phase 0: Motor Force Characterization (PREREQUISITE)
 
 **Rationale:** Before we can optimize wall approach, we need to understand the motor's force/deceleration characteristics across different control modes. Current characterization only covers steady-state velocity. We need dynamic force profiles for acceleration, coasting, braking, and reverse.
@@ -484,126 +536,199 @@ python3 run_wall_test.py --analyze wall_test_2026_01_08.pkl
 
 ---
 
-## Phase 2: Design Continuous Motor Control Function
+## Phase 2: Enhance Twist Control with Model-Based Braking
 
-**Based on Phase 0 characterization data**
+**Architecture:** Two-layer control system using twist control as the motor-level interface.
 
-### 2.1 Implement Low-Level Motor Command Interface
+### Control System Architecture
 
-**Location:** `include/drv8833.h`
-
-**Current:** `void go(float rate, bool fast_decay)`
-
-**New:** Keep low-level, expose direct control:
-```cpp
-void set_drive_mode(
-  float forward_duty,   // [0, 1]
-  float reverse_duty    // [0, 1]
-);
-// Combinations:
-// (fwd>0, rev=0) = forward drive
-// (fwd=0, rev>0) = reverse drive  
-// (fwd>0, rev>0) = brake (proportional to min(fwd,rev))
-// (fwd=0, rev=0) = coast
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    POSITION CONTROL LAYER                       │
+│  (WallApproachMode, GoToCanMode, etc.)                         │
+│                                                                 │
+│  Input: current_position, target_position, current_velocity     │
+│  Output: v_target, accel_target (constant decel to goal)        │
+│                                                                 │
+│  Trajectory: v(d) = sqrt(2 * decel * distance_to_goal)         │
+│              Arrive at target with v=0                          │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    TWIST CONTROL LAYER                          │
+│  (update_twist_control in main.cpp)                            │
+│                                                                 │
+│  Input: v_target, omega_target, accel_target, alpha_target      │
+│                                                                 │
+│  Logic:                                                         │
+│    if (v_target > v_current + threshold):                      │
+│      → ACCELERATE: use forward PWM with PI control              │
+│    elif (v_target ≈ v_current):                                │
+│      → MAINTAIN: use forward PWM with PI control                │
+│    else:                                                        │
+│      → DECELERATE: use proportional braking from force models   │
+│        brake_intensity = compute_brake_for_decel(desired_decel) │
+│                                                                 │
+│  Output: motor.go() or motor.brake()                           │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    DRV8833 MOTOR DRIVER                         │
+│                                                                 │
+│  go(rate, fast_decay=false) → forward/reverse PWM               │
+│  brake(intensity) → proportional braking (both pins HIGH)       │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-**Answer from Open Questions:** Implement at DRV8833 level
+### 2.1 Add Brake Model to Twist Control
+
+**Location:** `src/main.cpp`
+
+**Add characterized brake coefficients:**
+```cpp
+// Characterized brake models from Phase 0 (ground tests, 2026-01-22)
+// Model: decel = c0 + c1 * v (m/s²)
+struct BrakeModel {
+  float c0;  // constant term (m/s²)
+  float c1;  // velocity coefficient (1/s)
+};
+
+const BrakeModel coast_model = {0.951, 0.794};       // intensity = 0
+const BrakeModel pure_brake_model = {1.008, 2.950};  // intensity = 1
+```
+
+**Add brake intensity computation:**
+```cpp
+// Compute brake intensity to achieve desired deceleration at current velocity
+// Returns intensity in [0, 1] where 0=coast, 1=pure_brake
+// Returns -1 if desired decel is below coast (need forward PWM to slow down)
+// Returns >1 if desired decel exceeds pure_brake capability
+float compute_brake_intensity(float desired_decel, float v_current) {
+  float decel_coast = coast_model.c0 + coast_model.c1 * v_current;
+  float decel_brake = pure_brake_model.c0 + pure_brake_model.c1 * v_current;
+  
+  if (desired_decel < decel_coast) {
+    return -1.0;  // Can't decelerate this slowly with braking alone
+  }
+  if (desired_decel > decel_brake) {
+    return 1.0;   // Clamp to max braking (could add reverse torque later)
+  }
+  
+  // Linear interpolation between coast and pure_brake
+  return (desired_decel - decel_coast) / (decel_brake - decel_coast);
+}
+```
 
 ---
 
 ## 🛑 STOP POINT 2.1
 
 **Before proceeding to 2.2:**
-- Review low-level motor interface design
-- User approval for DRV8833 modifications
-- Discuss safety implications
+- Review brake model integration design
+- User approval for modifying twist control
+- Verify model coefficients match latest characterization
 
 ---
 
-### 2.2 Design Continuous Control Strategy
+### 2.2 Modify update_twist_control() for Braking
 
-**Location:** PIController in `src/main.cpp`
-
-**Input:** `(v_current, v_target, error, accel_current, accel_target)`
-
-**Output:** `MotorCommand(forward_duty, reverse_duty)`
-
-**Strategy using characterized force models:**
+**Changes to existing twist control:**
 
 ```cpp
-// Compute desired force based on tracking error and feedforward
-float F_desired = compute_desired_force(v_current, v_target, accel_target, error);
-
-// Convert desired force to motor commands using characterized models
-MotorCommand cmd;
-
-if (F_desired > 0) {
-  // Accelerating: use forward PWM
-  cmd = force_to_forward_pwm(F_desired, v_current);
+void update_twist_control() {
+  // ... existing ramping and kinematics code ...
   
-} else {
-  // Decelerating: choose optimal braking strategy
-  float F_needed = -F_desired;
+  // Get actual velocities
+  float v_left_actual = left_speedometer.get_velocity();
+  float v_right_actual = right_speedometer.get_velocity();
   
-  // Option 1: Can we achieve it by reducing forward PWM?
-  float F_friction = get_coast_friction_force(v_current);
-  if (F_needed <= F_friction * safety_margin) {
-    cmd = compute_reduced_forward_pwm(F_needed, v_current);
-  }
+  // Determine if we're decelerating
+  bool decelerating_left = v_left_target < v_left_actual - velocity_threshold;
+  bool decelerating_right = v_right_target < v_right_actual - velocity_threshold;
   
-  // Option 2: Need active braking
-  else if (F_needed <= get_max_brake_force(v_current)) {
-    cmd = compute_brake_command(F_needed, v_current);
-  }
-  
-  // Option 3: Need reverse torque
-  else {
-    cmd = compute_reverse_command(F_needed, v_current);
+  if (decelerating_left || decelerating_right) {
+    // DECELERATION MODE: Use proportional braking
+    
+    // Compute desired deceleration from target and current velocity
+    // If accel_target is specified, use it; otherwise compute from velocity error
+    float desired_decel_left = (accel_left < 0) ? -accel_left : 
+                               (v_left_actual - v_left_target) / expected_stop_time;
+    float desired_decel_right = (accel_right < 0) ? -accel_right :
+                                (v_right_actual - v_right_target) / expected_stop_time;
+    
+    // Compute brake intensities
+    float brake_left = compute_brake_intensity(desired_decel_left, v_left_actual);
+    float brake_right = compute_brake_intensity(desired_decel_right, v_right_actual);
+    
+    // Apply braking (clamp to valid range)
+    left_motor.brake(clamp(brake_left, 0.0, 1.0));
+    right_motor.brake(clamp(brake_right, 0.0, 1.0));
+    
+  } else {
+    // ACCELERATION/MAINTAIN MODE: Use existing PI control with forward PWM
+    // ... existing PI controller code ...
+    left_motor.go(pwm_left, false);
+    right_motor.go(pwm_right, false);
   }
 }
-
-return cmd;
 ```
 
-**Key:** All force conversions based on empirical models from Phase 0, not arbitrary thresholds
+**Key insight:** When decelerating, we bypass the PI controller entirely and use direct brake commands based on the characterized physics model. The PI controller is only used for acceleration and speed maintenance.
 
 ---
 
 ## 🛑 STOP POINT 2.2
 
 **Before proceeding to 2.3:**
-- Review continuous control strategy design
-- User approval for force-based controller
-- Verify Phase 0 models are available and validated
+- Review modified twist control design
+- User approval for control logic changes
+- Discuss hybrid PI/direct-brake approach
+- Plan for testing (low speeds first)
 
 ---
 
-### 2.3 Add Position Controller
+### 2.3 Add Position-to-Velocity Trajectory Generator
 
-**Answer from Open Questions:** Two-layer control architecture
+**For go-to-position tasks (wall approach, go-to-can):**
 
-**Outer Loop - Position Controller:**
+The position controller computes a velocity profile that arrives exactly at the target with v=0.
+
+**Constant deceleration profile:**
 ```cpp
-// Runs at lower frequency (e.g., 20 Hz)
-void update_position_control() {
-  float distance_error = target_distance - current_distance;
+// Given: current distance to target, current velocity, desired deceleration
+// Compute: target velocity for this instant
+
+float compute_approach_velocity(float distance_to_target, float v_current, float target_decel) {
+  // If we started braking now at target_decel, where would we stop?
+  // stopping_distance = v² / (2 * decel)
   
-  // Compute desired velocity from position error
-  float v_desired = k_p_position * distance_error;
-  v_desired = clamp(v_desired, -max_velocity, max_velocity);
+  // Invert: what velocity should we be at to stop exactly at distance_to_target?
+  // v_target = sqrt(2 * decel * distance_to_target)
   
-  // Compute desired acceleration (derivative of velocity setpoint)
-  float accel_desired = (v_desired - v_desired_prev) / dt;
-  accel_desired = clamp(accel_desired, -max_accel, max_accel);
+  float v_target = sqrt(2.0 * target_decel * distance_to_target);
   
-  // Feed to velocity controller
-  set_twist_target(v_desired, 0.0, accel_desired, 0.0);
+  // Clamp to max approach speed
+  v_target = min(v_target, max_approach_velocity);
+  
+  return v_target;
 }
+
+// In position control loop:
+float distance_to_target = current_tof_distance - target_distance;
+float v_target = compute_approach_velocity(distance_to_target, v_current, chosen_decel);
+float accel_target = (v_current > v_target) ? -chosen_decel : max_accel;
+
+set_twist_target(v_target, 0.0, accel_target, 0.0);
 ```
 
-**Inner Loop - Velocity Controller (existing):**
-- Uses force-based control from Phase 2.2
-- Runs at 10ms (100 Hz)
+**Choosing deceleration rate:**
+- Conservative: Use coast model (~1.5 m/s² at typical speeds)
+- Moderate: Use 50% brake (~2.0 m/s²)
+- Aggressive: Use pure brake (~3.5 m/s² at high speeds)
+
+Start conservative, can tune up based on test results.
 
 ---
 
@@ -612,59 +737,54 @@ void update_position_control() {
 **Before proceeding to Phase 3:**
 - Complete code review of all Phase 2 components
 - User must approve testing new controller
-- Test carefully with low speeds first
+- Test carefully with low speeds first (0.3 m/s)
 - Monitor for unexpected behavior
-- Compare to baseline performance
+- Verify deceleration matches model predictions
 
-**Do NOT proceed to optimization without explicit authorization**
+**Do NOT proceed to wall testing without explicit authorization**
 
 ---
 
-## Phase 3: Parameter Optimization
+## Phase 3: Wall Approach Testing & Optimization
 
-### 3.1 Define Parameter Space
+### 3.1 Test Protocol
 
-**From Phase 0 (fixed, characterized):**
-- Force models: friction coefficients, brake characteristics, reverse torque model
-- These are NOT tuned, they're measured physics
+**Conservative first approach:**
+1. Start distance: 1.5 m from wall
+2. Target distance: 0.25 m from wall (safe margin)
+3. Max approach speed: 0.3 m/s
+4. Deceleration: Use coast model only (gentlest)
+5. Safety stop: 0.15 m (emergency brake if closer)
 
-**Control parameters to optimize:**
-- Position controller: `k_p_position`, `k_d_position` (if added), `max_velocity`, `max_accel`
-- Velocity controller: Existing PI gains may need adjustment
-- Strategy selection: `safety_margin` for when to use coast vs brake vs reverse
-- Battery compensation: May need enhancement based on characterization
+**Metrics to collect:**
+- Final distance error (target - actual)
+- Overshoot (did we go past target?)
+- Time to stop
+- Velocity profile during deceleration
+- Actual vs predicted deceleration
 
-**Optimization targets:**
-- Minimize: mean absolute error, max overshoot
-- Minimize: approach time (secondary)
-- Constraint: No undershoot (must not stop short)
+### 3.2 Tuning Strategy
 
-### 3.2 Optimization Approach
+**If stopping too early (undershoot):**
+- Deceleration model over-estimates braking force
+- Options: Increase chosen_decel, or add small feedforward velocity
 
-**Phase 3A: Validate Force Models**
-- Run wall approach tests with force-based controller
-- Verify predicted vs actual deceleration matches
-- If mismatch: iterate on force characterization
+**If stopping too late (overshoot):**
+- Deceleration model under-estimates braking force
+- Options: Decrease chosen_decel, or start braking earlier
 
-**Phase 3B: Optimize High-Level Parameters**
-- Grid search on position controller gains (`k_p_position`, `max_accel`)
-- These should be small search space since force models are physics-based
-- Cost function: `J = w1*|mean_error| + w2*max_overshoot + w3*time`
-
-**Phase 3C: Adaptive/Online Tuning (future)**
-- Once basic system works, add online adaptation for:
-  - Surface changes (carpet vs hard floor)
-  - Battery degradation
-  - Load variations
+**If oscillating:**
+- Check for discontinuity between brake and forward modes
+- May need hysteresis in mode switching
 
 ---
 
 ## 🛑 STOP POINT 3.2
 
 **Before proceeding to 3.3:**
-- Review optimization approach
-- User approval for automated parameter sweep
-- Set safe parameter ranges
+- Review test protocol
+- User approval for wall approach tests
+- Verify safety margins are sufficient
 
 ---
 
@@ -750,27 +870,25 @@ python3 optimize_wall_approach.py --method bayesian --iterations 50
 
 ## Implementation Order
 
-**UPDATED - Physics-First Approach:**
+**UPDATED - January 22, 2026:**
 
 **⚠️ CRITICAL: Each step requires explicit user authorization before proceeding**
 
-1. ⏳ **Phase 0.2:** Enhance DRV8833 → 🛑 STOP - Get approval
-2. ⏳ **Phase 0.3:** Create ForceCharacterizationMode → 🛑 STOP - Get approval  
-3. ⏳ **Phase 0.4:** Add ROS messages → 🛑 STOP - Get approval
-4. ⏳ **Phase 0.5:** Create analysis script → 🛑 STOP - Get approval
-5. ⏳ **Phase 0.5:** Run force tests (rack) → 🛑 STOP - Review results
-6. ⏳ **Phase 0.5:** Run force tests (ground) → 🛑 STOP - Review results
-7. ⏳ **Phase 0.6:** Build force-to-control models → 🛑 MAJOR STOP - End Phase 0
-8. ⏳ **Phase 2.1:** Implement motor command interface → 🛑 STOP - Get approval
-9. ⏳ **Phase 2.2:** Design force-based controller → 🛑 STOP - Get approval
-10. ⏳ **Phase 2.3:** Add position controller → 🛑 MAJOR STOP - End Phase 2
-11. ⏳ **Phase 1.1-1.2:** Wall test infrastructure → 🛑 STOP - Get approval
-12. ⏳ **Phase 1.3-1.4:** Run baseline wall tests → 🛑 MAJOR STOP - End Phase 1
-13. ⏳ **Phase 3.1-3.2:** Validate and optimize → 🛑 STOP - Get approval
-14. ⏳ **Phase 3.3:** Run optimization → 🛑 MAJOR STOP - End Phase 3
-15. ⏳ **Phase 4:** Final validation → 🛑 FINAL STOP - Project complete
+### Completed ✅
+1. ✅ **Phase 0.2:** Enhance DRV8833 with proportional brake()
+2. ✅ **Phase 0.3:** Create ForceCharacterizationMode
+3. ✅ **Phase 0.4:** Add ROS messages for force characterization
+4. ✅ **Phase 0.5:** Create analysis script (run_force_characterization.py)
+5. ✅ **Phase 0.5:** Run force tests (ground) - Results recorded above
+6. ✅ **Phase 0.6:** Build force models (coast, pure_brake, prop_brake)
 
-**Key Change:** Force characterization (Phase 0) comes FIRST, before wall testing
+### Next Steps
+7. ⏳ **Phase 2.1:** Add brake models to twist control → 🛑 STOP - Get approval
+8. ⏳ **Phase 2.2:** Modify update_twist_control() for braking → 🛑 STOP - Get approval
+9. ⏳ **Phase 2.3:** Add position-to-velocity trajectory generator → 🛑 MAJOR STOP - End Phase 2
+10. ⏳ **Phase 3.1:** Wall approach testing (conservative) → 🛑 STOP - Review results
+11. ⏳ **Phase 3.2:** Tune deceleration parameters → 🛑 STOP - Get approval
+12. ⏳ **Phase 4:** Final validation → 🛑 FINAL STOP - Project complete
 
 **Implementation Protocol:**
 - One step at a time
@@ -784,19 +902,30 @@ python3 optimize_wall_approach.py --method bayesian --iterations 50
 ## Open Questions (ANSWERED)
 
 1. **Braking implementation:** Option A (DRV8833) vs Option B (PIController)?  
-   **A:** DRV8833 level - expose low-level control
+   **A:** Use existing DRV8833.brake() function. Twist control decides when to use it.
 
 2. **Deceleration thresholds:** What initial values for threshold1/threshold2?  
-   **A:** Don't use thresholds - characterize motors and use physics-based force models
+   **A:** Don't use thresholds - use characterized physics models to compute brake intensity
 
 3. **Position vs velocity control:** Hard switch or blended transition?  
-   **A:** Two controllers - Position controller sets V and A, Velocity/Motor controller tracks them
+   **A:** Two-layer: Position controller generates velocity trajectory → Twist control tracks it with model-based braking
 
 4. **TOF sensor:** Which sensor to use? Center only, or average of all three?  
    **A:** Center only
 
 5. **Battery compensation:** Current approach sufficient or needs enhancement?  
-   **A:** Unknown - currently use "virtual voltage" and PWM scales with battery voltage. Need to understand behavior during deceleration. Phase 0 characterization should reveal this.
+   **A:** Brake models are independent of battery (shorting motor windings). Forward drive still uses battery compensation.
+
+6. **How to achieve precise deceleration?** (NEW)  
+   **A:** Twist control interpolates between coast (intensity=0) and pure_brake (intensity=1) based on characterized models. Position controller commands constant deceleration trajectory that arrives at target with v=0.
+
+---
+
+## Known Limitations / TODOs
+
+1. **External cmd_vel=0 while moving:** Current twist control only brakes when the position controller explicitly commands negative acceleration. If an external source sends `cmd_vel=0` while the robot is moving fast, the PI controller will try to achieve v=0 via forward PWM reduction only (which may be inadequate at high speeds). 
+   - **Workaround:** Position controllers must always compute and command appropriate deceleration
+   - **Future fix:** Twist control could infer required deceleration when v_target=0 and v_actual >> 0, even if accel_target not explicitly negative
 
 ---
 

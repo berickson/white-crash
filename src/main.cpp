@@ -595,6 +595,9 @@ class ForceCharacterizationMode;
 extern ForceCharacterizationMode force_char_mode;
 void set_force_char_ground_mode(bool ground);
 
+// Forward declaration for wall approach test
+void configure_wall_test(float target_dist, float max_speed, float accel, float decel, float safety_dist);
+
 // Command REPL callback
 void command_callback(const void *msgin) {
   const std_msgs__msg__String *msg = (const std_msgs__msg__String *)msgin;
@@ -633,6 +636,34 @@ void command_callback(const void *msgin) {
       }
     } else {
       snprintf(response, sizeof(response), "ERROR: Usage: force-test <mode> <velocity> <param>");
+    }
+    logf("REPL: %s", response);
+  }
+  // Command: wall-test <target_dist> <max_speed> <accel> <decel> <safety_dist>
+  // Example: wall-test 0.20 0.5 3.0 1.5 0.12
+  // All distances in meters, accel/decel in m/s²
+  else if (strncmp(msg->data.data, "wall-test ", 10) == 0) {
+    float target_dist, max_speed, accel, decel, safety_dist;
+    int parsed = sscanf(msg->data.data + 10, "%f %f %f %f %f", 
+                        &target_dist, &max_speed, &accel, &decel, &safety_dist);
+    
+    if (parsed == 5) {
+      configure_wall_test(target_dist, max_speed, accel, decel, safety_dist);
+      snprintf(response, sizeof(response), 
+               "OK: wall-test target=%.3fm max_v=%.2fm/s accel=%.2f decel=%.2fm/s² safety=%.3fm", 
+               target_dist, max_speed, accel, decel, safety_dist);
+    } else if (parsed >= 1) {
+      // Allow partial config with defaults
+      max_speed = (parsed >= 2) ? max_speed : 0.5f;
+      accel = (parsed >= 3) ? accel : 2.0f;
+      decel = (parsed >= 4) ? decel : 1.5f;
+      safety_dist = (parsed >= 5) ? safety_dist : 0.12f;
+      configure_wall_test(target_dist, max_speed, accel, decel, safety_dist);
+      snprintf(response, sizeof(response), 
+               "OK: wall-test target=%.3fm (defaults for other params)", target_dist);
+    } else {
+      snprintf(response, sizeof(response), 
+               "ERROR: Usage: wall-test <target_dist> [max_speed] [accel] [decel] [safety_dist]");
     }
     logf("REPL: %s", response);
   }
@@ -1245,6 +1276,56 @@ const float max_linear_accel = 1.0;  // m/s² - maximum linear acceleration
 const float max_angular_accel = 2.0; // rad/s² - maximum angular acceleration
 
 //////////////////////////////////
+// Brake Models (Characterized 2026-01-22, ground tests)
+// Model: decel = c0 + c1 * v (m/s²)
+// See wall_positioning_plan.md for characterization details
+
+struct BrakeModel {
+  float c0;  // constant term (m/s²)
+  float c1;  // velocity coefficient (1/s)
+};
+
+const BrakeModel coast_model = {0.951f, 0.794f};       // intensity = 0 (both pins LOW)
+const BrakeModel pure_brake_model = {1.008f, 2.950f};  // intensity = 1 (both pins HIGH)
+
+/**
+ * Compute deceleration for a given brake intensity and velocity.
+ * @param intensity Brake intensity [0, 1] where 0=coast, 1=pure_brake
+ * @param v_current Current velocity (m/s), should be positive
+ * @return Expected deceleration (m/s²), always positive
+ */
+float predict_deceleration(float intensity, float v_current) {
+  // Interpolate between coast and pure_brake models
+  float c0 = coast_model.c0 + intensity * (pure_brake_model.c0 - coast_model.c0);
+  float c1 = coast_model.c1 + intensity * (pure_brake_model.c1 - coast_model.c1);
+  return c0 + c1 * fabs(v_current);
+}
+
+/**
+ * Compute brake intensity to achieve desired deceleration at current velocity.
+ * @param desired_decel Desired deceleration (m/s²), positive value
+ * @param v_current Current velocity (m/s), should be positive
+ * @return Brake intensity [0, 1] or:
+ *         -1 if desired_decel is below coast capability (need forward PWM)
+ *         Value > 1 if desired_decel exceeds pure_brake (clamped to 1)
+ */
+float compute_brake_intensity(float desired_decel, float v_current) {
+  float v = fabs(v_current);
+  float decel_coast = coast_model.c0 + coast_model.c1 * v;
+  float decel_brake = pure_brake_model.c0 + pure_brake_model.c1 * v;
+  
+  if (desired_decel < decel_coast) {
+    return -1.0f;  // Can't decelerate this slowly with braking alone
+  }
+  if (desired_decel >= decel_brake) {
+    return 1.0f;   // Clamp to max braking
+  }
+  
+  // Linear interpolation between coast and pure_brake
+  return (desired_decel - decel_coast) / (decel_brake - decel_coast);
+}
+
+//////////////////////////////////
 // Differential Drive Kinematics
 
 // Track width (wheelbase) in meters - approximate for now
@@ -1327,6 +1408,96 @@ void set_twist_target(float v_linear, float omega_angular,
   twist_target_angular = omega_angular;
   twist_target_accel_linear = accel_linear;
   twist_target_accel_angular = accel_angular;
+}
+
+//////////////////////////////////
+// Position-to-Velocity Trajectory Generator
+// Computes velocity profile to arrive at target position with v=0
+
+/**
+ * Compute target velocity for position approach using constant deceleration.
+ * Uses physics: v = sqrt(2 * decel * distance) to arrive exactly at target with v=0.
+ * 
+ * @param distance_to_target Distance remaining to target (m), should be positive
+ * @param v_current Current velocity (m/s)
+ * @param target_decel Desired deceleration rate (m/s²), positive value
+ * @param max_velocity Maximum approach velocity (m/s)
+ * @return Target velocity (m/s) for this instant
+ */
+float compute_approach_velocity(float distance_to_target, float v_current, 
+                                float target_decel, float max_velocity) {
+  if (distance_to_target <= 0.0f) {
+    return 0.0f;  // At or past target
+  }
+  
+  // v = sqrt(2 * decel * distance)
+  // This is the velocity we should be at to stop exactly at target
+  float v_target = sqrtf(2.0f * target_decel * distance_to_target);
+  
+  // Clamp to max approach speed
+  if (v_target > max_velocity) {
+    v_target = max_velocity;
+  }
+  
+  return v_target;
+}
+
+/**
+ * Compute twist target for approaching a position.
+ * Handles both approach (moving toward target) and arrival (at target).
+ * Uses regime-based acceleration: accel when far, decel when on braking curve.
+ * 
+ * @param distance_to_target Distance remaining (m), positive = need to move forward
+ * @param v_current Current velocity (m/s)
+ * @param target_accel Desired acceleration for speeding up (m/s²), positive
+ * @param target_decel Desired deceleration for braking phase (m/s²), positive
+ * @param max_velocity Maximum approach speed (m/s)
+ * @param position_tolerance Stop threshold (m) - consider arrived when closer than this
+ */
+void set_approach_twist(float distance_to_target, float v_current,
+                        float target_accel, float target_decel, float max_velocity,
+                        float position_tolerance = 0.005f) {
+  
+  if (distance_to_target <= position_tolerance) {
+    // At target - stop with braking
+    set_twist_target(0.0f, 0.0f, -target_decel, 0.0f);
+    return;
+  }
+  
+  // Compute braking curve velocity: v = sqrt(2 * decel * distance)
+  float v_brake = sqrtf(2.0f * target_decel * distance_to_target);
+  
+  // Target velocity is minimum of braking curve and max velocity
+  float v_target = (v_brake < max_velocity) ? v_brake : max_velocity;
+  
+  // Determine feedforward acceleration.
+  // 
+  // Primary logic: regime-based (based on trajectory shape, not velocity error)
+  // - On braking curve → feedforward = -decel (trajectory is decelerating)
+  // - Below cruise speed, not braking → feedforward = +accel (accelerating to cruise)
+  // - At cruise speed → feedforward = 0 (steady state)
+  //
+  // Override: if actual velocity significantly exceeds target, brake explicitly.
+  // This handles overshoot situations where PI alone is too slow.
+  
+  float accel_target;
+  const float overshoot_threshold = 0.15f;  // Brake if >15cm/s over target
+  
+  if (v_current > v_target + overshoot_threshold) {
+    // Significantly above target - brake to bring velocity down
+    accel_target = -target_decel;
+  } else if (v_brake < max_velocity) {
+    // On braking curve - trajectory is decelerating
+    accel_target = -target_decel;
+  } else if (v_current < max_velocity - 0.05f) {
+    // Below cruise speed, not yet on braking curve - accelerating toward max
+    accel_target = target_accel;
+  } else {
+    // At or near cruise speed - steady state
+    accel_target = 0.0f;
+  }
+  
+  set_twist_target(v_target, 0.0f, accel_target, 0.0f);
 }
 
 /**
@@ -1491,13 +1662,66 @@ void update_twist_control() {
     pwm_right = constrain(pwm_right, -1.0, 1.0);
   }
 
-  // use fast decay if we are trying to decelerate
-  bool fast_decay_left = fabs(v_left_target) < fabs(v_left_actual);
-  bool fast_decay_right = fabs(v_right_target) < fabs(v_right_actual);
+  // Model-based braking decision:
+  // Only use active brakes when we need MORE deceleration than coast provides.
+  // Otherwise, just use PI controller (which will reduce PWM naturally).
+  //
+  // Use brakes when:
+  //   1. Explicit negative acceleration is commanded (accel < 0)
+  //   2. AND that deceleration exceeds what coast friction provides
+  //
+  // TODO: Handle case where accel_target==0 but v_target=0 and v_actual>>0
+  //       (e.g., cmd_vel=0 while moving). Should probably brake hard, not coast.
+  //       For now, position controller must explicitly command deceleration.
+  //
+  // If accel_target == 0, PI controller handles velocity tracking with natural coast.
+  
+  // Left wheel
+  bool use_brake_left = false;
+  float brake_intensity_left = 0.0f;
+  
+  if (accel_left < 0 && fabs(v_left_actual) > 0.02f) {
+    // Explicit deceleration commanded - check if we need active braking
+    float desired_decel = -accel_left;
+    float coast_decel = coast_model.c0 + coast_model.c1 * fabs(v_left_actual);
+    
+    if (desired_decel > coast_decel) {
+      // Need more braking than coast provides
+      brake_intensity_left = compute_brake_intensity(desired_decel, v_left_actual);
+      use_brake_left = (brake_intensity_left >= 0);
+    }
+  }
+  
+  // Right wheel
+  bool use_brake_right = false;
+  float brake_intensity_right = 0.0f;
+  
+  if (accel_right < 0 && fabs(v_right_actual) > 0.02f) {
+    // Explicit deceleration commanded - check if we need active braking
+    float desired_decel = -accel_right;
+    float coast_decel = coast_model.c0 + coast_model.c1 * fabs(v_right_actual);
+    
+    if (desired_decel > coast_decel) {
+      // Need more braking than coast provides
+      brake_intensity_right = compute_brake_intensity(desired_decel, v_right_actual);
+      use_brake_right = (brake_intensity_right >= 0);
+    }
+  }
 
   // Apply motor commands
-  left_motor.go(pwm_left, fast_decay_left);
-  right_motor.go(pwm_right, fast_decay_right);
+  if (use_brake_left) {
+    left_motor.brake(constrain(brake_intensity_left, 0.0f, 1.0f));
+  } else {
+    // Use PI controller output (handles accel, maintain, and gentle decel)
+    left_motor.go(pwm_left, false);
+  }
+  
+  if (use_brake_right) {
+    right_motor.brake(constrain(brake_intensity_right, 0.0f, 1.0f));
+  } else {
+    // Use PI controller output (handles accel, maintain, and gentle decel)
+    right_motor.go(pwm_right, false);
+  }
 }
 
 //////////////////////////////////
@@ -1917,6 +2141,7 @@ public:
   float target_velocity = 0.0;  // m/s
   float test_parameter = 0.0;   // PWM level, brake duty, etc.
   bool is_ground_test = false;  // True for ground tests (enables safety features)
+  bool emergency_stopped = false;  // True if TOF safety triggered - keep brakes on!
 
   State state = idle;
   unsigned long state_start_time = 0;
@@ -1927,7 +2152,7 @@ public:
   unsigned long test_duration_ms = 3000;     // Record test data (rack)
   
   // Ground test safety parameters
-  const float tof_safety_distance_mm = 150.0;  // Emergency stop if wall closer than this
+  const float tof_safety_distance_mm = 500.0;  // Emergency stop if wall closer than this (increased for 2m/s tests)
   const float stopped_velocity = 0.03;         // Consider stopped when below this (m/s)
   const unsigned long ground_test_max_ms = 2000;  // Max ground test duration (shorter for safety)
 
@@ -2068,8 +2293,12 @@ public:
   bool tof_safety_triggered() {
     if (!is_ground_test) return false;
     
-    // Check center TOF (primary forward-facing sensor)
-    float center_dist = tof_center.distance * 1000.0;  // Convert to mm
+    // Check center TOF (primary forward-facing sensor) with mutex protection
+    float center_dist;
+    xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
+    center_dist = tof_center.distance * 1000.0;  // Convert to mm
+    xSemaphoreGive(sensor_data_mutex);
+    
     if (!isnan(center_dist) && center_dist < tof_safety_distance_mm) {
       logf("TOF SAFETY: Wall at %.0f mm, stopping test!", center_dist);
       return true;
@@ -2084,6 +2313,15 @@ public:
     }
 
     unsigned long elapsed = millis() - state_start_time;
+    
+    // Debug: log state every 500ms
+    static unsigned long last_debug_log = 0;
+    if (millis() - last_debug_log > 500) {
+      float avg_v = (left_speedometer.get_velocity() + right_speedometer.get_velocity()) / 2.0;
+      logf("FC state=%d, v=%.2f, target=%.2f, at_target=%d, elapsed=%lu", 
+           state, avg_v, target_velocity, at_target_velocity(), elapsed);
+      last_debug_log = millis();
+    }
 
     switch (state) {
       case accelerating:
@@ -2092,6 +2330,7 @@ public:
           logf("ABORT: TOF safety during acceleration");
           left_motor.brake(1.0);
           right_motor.brake(1.0);
+          emergency_stopped = true;  // Keep brakes on in end()
           state = complete;
           set_done();
           break;
@@ -2114,6 +2353,7 @@ public:
           logf("ABORT: TOF safety during settling");
           left_motor.brake(1.0);
           right_motor.brake(1.0);
+          emergency_stopped = true;  // Keep brakes on in end()
           state = complete;
           set_done();
           break;
@@ -2137,6 +2377,7 @@ public:
           logf("ABORT: TOF safety during testing");
           left_motor.brake(1.0);
           right_motor.brake(1.0);
+          emergency_stopped = true;  // Keep brakes on in end()
           state = complete;
           set_done();
           break;
@@ -2173,12 +2414,22 @@ public:
   virtual void end() override {
     logf("Force test end");
     disable_twist_control();
-    left_motor.go(0.0);
-    right_motor.go(0.0);
+    
+    // If emergency stopped, keep brakes on! Otherwise release to coast.
+    if (emergency_stopped) {
+      logf("E-STOP: Keeping brakes applied!");
+      left_motor.brake(1.0);
+      right_motor.brake(1.0);
+    } else {
+      left_motor.go(0.0);
+      right_motor.go(0.0);
+    }
+    
     // Reset for next test
     test_type = none;
     state = idle;
     is_ground_test = false;
+    emergency_stopped = false;  // Reset for next test
   }
 
   virtual void get_display_string(char * buffer, int buffer_size) override {
@@ -2197,6 +2448,228 @@ bool configure_force_test(const char* mode_str, float velocity, float param) {
 // Implementation of forward-declared function for setting ground mode
 void set_force_char_ground_mode(bool ground) {
   force_char_mode.set_ground_mode(ground);
+}
+
+
+/**
+ * WallApproachTestMode - Test precise wall approach using model-based braking
+ * 
+ * Uses characterized brake models to compute constant-deceleration trajectory
+ * that arrives at target distance with v=0.
+ * 
+ * Trigger: "wall-test" FSM event from hand mode
+ * Configure: Use ROS command to set parameters before triggering
+ */
+class WallApproachTestMode : public Task {
+public:
+  // Test states
+  enum State {
+    idle,           // Waiting for test start
+    approaching,    // Moving toward wall with trajectory control
+    settling,       // Stopped, waiting to record final position
+    complete        // Test done
+  };
+
+  // Configurable parameters (set via command before triggering)
+  float target_distance = 0.20f;      // Goal distance from wall (m)
+  float max_approach_speed = 0.5f;    // Maximum approach velocity (m/s)
+  float accel_rate = 2.0f;            // Target acceleration (m/s²) - can be aggressive
+  float decel_rate = 1.5f;            // Target deceleration (m/s²) - conservative default
+  float safety_distance = 0.12f;      // Emergency stop if closer than this (m)
+  
+  // State
+  State state = idle;
+  unsigned long state_start_time = 0;
+  float final_distance = NAN;         // Recorded after settling
+  float start_distance = NAN;         // Distance at test start
+  bool emergency_stopped = false;
+  
+  // Timing
+  const unsigned long settle_time_ms = 500;   // Wait time after stopping
+  const unsigned long approach_timeout_ms = 10000;  // Max approach time
+  
+  // Velocity threshold for "stopped"
+  const float stopped_velocity = 0.02f;  // m/s
+
+  WallApproachTestMode() {
+    name = "wall-test";
+  }
+
+  // Configure test parameters (call before triggering mode)
+  void configure(float target_dist, float max_speed, float accel, float decel, float safety_dist) {
+    target_distance = target_dist;
+    max_approach_speed = max_speed;
+    accel_rate = accel;
+    decel_rate = decel;
+    safety_distance = safety_dist;
+    logf("Wall test configured: target=%.3fm, max_v=%.2fm/s, accel=%.2fm/s², decel=%.2fm/s², safety=%.3fm",
+         target_distance, max_approach_speed, accel_rate, decel_rate, safety_distance);
+  }
+
+  float get_tof_distance() {
+    // Read center TOF with mutex protection - already in meters
+    float dist;
+    xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
+    dist = tof_center.distance;
+    xSemaphoreGive(sensor_data_mutex);
+    return isnan(dist) ? 999.0f : dist;
+  }
+
+  float get_velocity() {
+    return (left_speedometer.get_velocity() + right_speedometer.get_velocity()) / 2.0f;
+  }
+
+  bool is_stopped() {
+    return fabs(get_velocity()) < stopped_velocity;
+  }
+
+  const char* get_state_string() {
+    switch (state) {
+      case idle: return "idle";
+      case approaching: return "approaching";
+      case settling: return "settling";
+      case complete: return "complete";
+      default: return "unknown";
+    }
+  }
+
+  virtual void begin() override {
+    logf("Wall approach test begin");
+    
+    start_distance = get_tof_distance();
+    final_distance = NAN;
+    emergency_stopped = false;
+    
+    if (start_distance < target_distance + 0.1f) {
+      logf("ERROR: Already too close to wall (%.3fm), need at least %.3fm",
+           start_distance, target_distance + 0.1f);
+      state = complete;
+      return;
+    }
+    
+    logf("Starting at %.3fm from wall, target %.3fm", start_distance, target_distance);
+    
+    enable_twist_control();
+    state = approaching;
+    state_start_time = millis();
+  }
+
+  virtual void execute() override {
+    if (state == complete || state == idle) {
+      set_done();
+      return;
+    }
+
+    unsigned long elapsed = millis() - state_start_time;
+    float current_distance = get_tof_distance();
+    float current_velocity = get_velocity();
+    float distance_to_target = current_distance - target_distance;
+
+    // Safety check - emergency stop if too close
+    if (current_distance < safety_distance) {
+      logf("EMERGENCY STOP: Wall at %.3fm (safety=%.3fm)", current_distance, safety_distance);
+      disable_twist_control();
+      left_motor.brake(1.0f);
+      right_motor.brake(1.0f);
+      emergency_stopped = true;
+      final_distance = current_distance;
+      state = complete;
+      set_done();
+      return;
+    }
+
+    switch (state) {
+      case approaching: {
+        // Use trajectory generator to compute velocity target
+        set_approach_twist(distance_to_target, current_velocity, 
+                          accel_rate, decel_rate, max_approach_speed, 0.005f);
+        
+        // Debug logging every 200ms
+        static unsigned long last_log = 0;
+        if (millis() - last_log > 200) {
+          logf("Approach: d=%.3fm, v=%.3fm/s, d_to_target=%.3fm", 
+               current_distance, current_velocity, distance_to_target);
+          last_log = millis();
+        }
+        
+        // Check if stopped (arrived at target)
+        if (is_stopped() && distance_to_target < 0.05f) {
+          logf("Arrived, settling...");
+          // Apply brake to hold position
+          disable_twist_control();
+          left_motor.brake(1.0f);
+          right_motor.brake(1.0f);
+          state = settling;
+          state_start_time = millis();
+        }
+        
+        // Timeout check
+        if (elapsed > approach_timeout_ms) {
+          logf("TIMEOUT: Approach took too long");
+          disable_twist_control();
+          left_motor.brake(1.0f);
+          right_motor.brake(1.0f);
+          final_distance = current_distance;
+          state = complete;
+          set_done();
+        }
+        break;
+      }
+
+      case settling: {
+        // Wait for settling time, then record final position
+        if (elapsed >= settle_time_ms) {
+          final_distance = get_tof_distance();
+          float error_mm = (final_distance - target_distance) * 1000.0f;
+          logf("RESULT: Final=%.3fm, Target=%.3fm, Error=%.1fmm", 
+               final_distance, target_distance, error_mm);
+          state = complete;
+          state_start_time = millis();  // Reset timer for complete state delay
+        }
+        break;
+      }
+
+      case idle:
+        set_done();
+        break;
+        
+      case complete:
+        // Wait 100ms after logging result to ensure ROS has time to transmit
+        if (millis() - state_start_time >= 100) {
+          set_done();
+        }
+        break;
+    }
+  }
+
+  virtual void end() override {
+    logf("Wall approach test end");
+    disable_twist_control();
+    
+    if (emergency_stopped) {
+      logf("E-STOP: Keeping brakes applied!");
+      left_motor.brake(1.0f);
+      right_motor.brake(1.0f);
+    } else {
+      left_motor.go(0.0f);
+      right_motor.go(0.0f);
+    }
+    
+    // Reset state for next test
+    state = idle;
+    emergency_stopped = false;
+  }
+
+  virtual void get_display_string(char * buffer, int buffer_size) override {
+    float dist = get_tof_distance();
+    snprintf(buffer, buffer_size, "Wall:%s d=%.2f", get_state_string(), dist);
+  }
+
+} wall_approach_mode;
+
+// Forward-declared function to configure wall test
+void configure_wall_test(float target_dist, float max_speed, float accel, float decel, float safety_dist) {
+  wall_approach_mode.configure(target_dist, max_speed, accel, decel, safety_dist);
 }
 
 
@@ -2326,6 +2799,23 @@ public:
 
     float approach_velocity = std::min<float>({stop_velocity, accel_velocity, max_approach_velocity});
 
+    // Determine acceleration based on which constraint is active:
+    // - stop_velocity wins → decel region → -max_accel (engage brakes)
+    // - accel_velocity wins → accelerating → +max_accel
+    // - max_approach_velocity wins → cruising → 0
+    float accel;
+    if (stop_velocity <= accel_velocity && stop_velocity <= max_approach_velocity) {
+      accel = -max_accel;  // Braking region
+    } else if (accel_velocity <= max_approach_velocity) {
+      accel = max_accel;   // Accelerating
+    } else {
+      accel = 0.0f;        // Cruising at max speed
+    }
+
+    // Update for next iteration
+    last_v = approach_velocity;
+    last_ms = millis();
+
     // if any distance is close enough, we are done
     if (min_distance <= goal_distance ) {
       set_done();
@@ -2335,12 +2825,12 @@ public:
         set_done("lost-can");
     } else if (center_distance == min_distance) {
       // if center is the min distance, go there
-      set_twist_target( approach_velocity, 0, max_accel);
+      set_twist_target( approach_velocity, 0, accel);
     } else if (right_distance == min_distance) {
-      set_twist_target( approach_velocity, -max_angular_integral, max_accel);
+      set_twist_target( approach_velocity, -max_angular_integral, accel);
     } else {
       // left distance must be the min, go there
-      set_twist_target( approach_velocity, max_angular_integral, max_accel);
+      set_twist_target( approach_velocity, max_angular_integral, accel);
     }
 
   }
@@ -2532,6 +3022,7 @@ std::vector<Task *> tasks = {
     &open_loop_characterization_mode,
     &pi_control_test_mode,
     &force_char_mode,
+    &wall_approach_mode,
     &cmd_vel_auto_mode,
     &waypoint_following_mode,
     &failsafe_mode,
@@ -2575,6 +3066,12 @@ std::vector<Fsm::Edge> edges = {
     Fsm::Edge("force-char", "done", "hand"),
     Fsm::Edge("force-char", "rc-moved", "hand"),
     Fsm::Edge("force-char", "hand", "hand"),  // Allow explicit return to hand
+    
+    // Wall approach test mode
+    Fsm::Edge("hand", "wall-test", "wall-test"),
+    Fsm::Edge("wall-test", "done", "hand"),
+    Fsm::Edge("wall-test", "rc-moved", "hand"),
+    Fsm::Edge("wall-test", "hand", "hand"),  // Allow explicit return to hand
     
     Fsm::Edge("*", "off", "off"),
 };
