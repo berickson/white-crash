@@ -1330,6 +1330,50 @@ float compute_brake_intensity(float desired_decel, float v_current) {
   return (desired_decel - decel_coast) / (decel_brake - decel_coast);
 }
 
+/**
+ * Compute exact stopping distance from velocity v with velocity-dependent deceleration.
+ * Model: decel(v) = c0 + c1 * v
+ * Exact solution: d = v/c1 - (c0/c1²)*ln(1 + c1*v/c0)
+ */
+float stopping_distance(float v, float c0, float c1) {
+  if (v <= 0.0f) return 0.0f;
+  if (c1 < 0.001f) {
+    // Nearly constant deceleration, use simple formula
+    return v * v / (2.0f * c0);
+  }
+  return v / c1 - (c0 / (c1 * c1)) * logf(1.0f + c1 * v / c0);
+}
+
+/**
+ * Compute velocity needed to stop in exactly distance d.
+ * Inverse of stopping_distance, solved via Newton's method.
+ * Model: decel(v) = c0 + c1 * v
+ * @param d Distance to stop in (m)
+ * @param c0 Constant deceleration term (m/s²)
+ * @param c1 Velocity-dependent deceleration coefficient (1/s)
+ * @param max_v Maximum velocity to return (m/s)
+ * @return Velocity (m/s) that would stop exactly in distance d
+ */
+float velocity_for_distance(float d, float c0, float c1, float max_v) {
+  if (d <= 0.0f) return 0.0f;
+  
+  // Initial guess: constant-decel approximation
+  float v = sqrtf(2.0f * c0 * d);
+  if (v > max_v) v = max_v;
+  
+  // Newton iterations: f(v) = stopping_distance(v) - d, f'(v) = v/(c0+c1*v)
+  for (int i = 0; i < 5; i++) {
+    float f = stopping_distance(v, c0, c1) - d;
+    float fp = v / (c0 + c1 * v);  // derivative
+    if (fp < 1e-6f) break;
+    v -= f / fp;
+    if (v < 0.0f) v = 0.0f;
+    if (v > max_v) v = max_v;
+  }
+  
+  return v;
+}
+
 //////////////////////////////////
 // Differential Drive Kinematics
 
@@ -1463,37 +1507,45 @@ void set_approach_twist(float distance_to_target, float v_current,
                         float target_accel, float target_decel, float max_velocity,
                         float position_tolerance = 0.005f) {
   
+  // Compute interpolated brake model from user's decel parameter.
+  // Find the brake intensity that produces target_decel at max_velocity,
+  // then use the corresponding velocity-dependent model for the curve.
+  float intensity = compute_brake_intensity(target_decel, max_velocity);
+  if (intensity < 0.0f) intensity = 0.0f;  // coast is enough
+  if (intensity > 1.0f) intensity = 1.0f;
+  float curve_c0 = coast_model.c0 + intensity * (pure_brake_model.c0 - coast_model.c0);
+  float curve_c1 = coast_model.c1 + intensity * (pure_brake_model.c1 - coast_model.c1);
+  
   if (distance_to_target <= position_tolerance) {
-    // At target - stop with braking
-    set_twist_target(0.0f, 0.0f, -target_decel, 0.0f);
+    // At target - stop with braking (velocity-dependent)
+    float decel_at_v = curve_c0 + curve_c1 * fabs(v_current);
+    set_twist_target(0.0f, 0.0f, -decel_at_v, 0.0f);
     return;
   }
   
-  // Compute braking curve velocity: v = sqrt(2 * decel * distance)
-  float v_brake = sqrtf(2.0f * target_decel * distance_to_target);
+  // Compute braking curve velocity using physics-based model.
+  // This accounts for velocity-dependent friction, giving accurate
+  // stopping distances especially at low speeds.
+  float v_brake = velocity_for_distance(distance_to_target, curve_c0, curve_c1, max_velocity);
   
   // Target velocity is minimum of braking curve and max velocity
   float v_target = (v_brake < max_velocity) ? v_brake : max_velocity;
   
   // Determine feedforward acceleration.
-  // 
-  // Primary logic: regime-based (based on trajectory shape, not velocity error)
-  // - On braking curve → feedforward = -decel (trajectory is decelerating)
-  // - Below cruise speed, not braking → feedforward = +accel (accelerating to cruise)
-  // - At cruise speed → feedforward = 0 (steady state)
-  //
-  // Override: if actual velocity significantly exceeds target, brake explicitly.
-  // This handles overshoot situations where PI alone is too slow.
-  
   float accel_target;
   const float overshoot_threshold = 0.15f;  // Brake if >15cm/s over target
   
   if (v_current > v_target + overshoot_threshold) {
-    // Significantly above target - brake to bring velocity down
-    accel_target = -target_decel;
+    // Significantly above target - brake hard
+    accel_target = -(curve_c0 + curve_c1 * fabs(v_current));
   } else if (v_brake < max_velocity) {
-    // On braking curve - trajectory is decelerating
-    accel_target = -target_decel;
+    // In braking region - use velocity-dependent decel, scaled by
+    // how close we are to the curve. On or above: full model decel.
+    // Below: proportionally less, so PI can track smoothly.
+    float decel_at_v = curve_c0 + curve_c1 * fabs(v_current);
+    float ratio = v_current / fmaxf(v_brake, 0.01f);
+    if (ratio > 1.0f) ratio = 1.0f;
+    accel_target = -decel_at_v * ratio;
   } else if (v_current < max_velocity - 0.05f) {
     // Below cruise speed, not yet on braking curve - accelerating toward max
     accel_target = target_accel;
@@ -1553,12 +1605,27 @@ void disable_twist_control() {
  * Called automatically from main loop at 10ms intervals when twist_control_enabled.
  */
 void update_twist_control() {
-  // Deadband: if targets are near zero, just stop motors and don't run control
-  // This prevents small movements from sensor noise when no command is given
+  // Deadband: if targets are near zero, stop motors.
+  // If deceleration is commanded, use brakes; otherwise coast.
   const float target_deadband = 0.01; // 0.01 m/s or 0.01 rad/s
   if (abs(twist_target_linear) < target_deadband && abs(twist_target_angular) < target_deadband) {
-    left_motor.go(0);
-    right_motor.go(0);
+    if (twist_target_accel_linear < -0.1f) {
+      // Deceleration commanded with zero velocity target - apply brakes
+      float desired_decel = -twist_target_accel_linear;
+      float v_avg = (fabs(left_speedometer.get_velocity()) + fabs(right_speedometer.get_velocity())) / 2.0f;
+      float intensity = compute_brake_intensity(desired_decel, v_avg);
+      intensity = constrain(intensity, 0.0f, 1.0f);
+      left_motor.brake(intensity);
+      right_motor.brake(intensity);
+      left_motor_mode = 2;
+      right_motor_mode = 2;
+    } else {
+      // No deceleration intent - coast
+      left_motor.go(0);
+      right_motor.go(0);
+      left_motor_mode = 0;
+      right_motor_mode = 0;
+    }
     // Also reset ramped state to prevent jump when command arrives
     twist_ramped_linear = 0.0;
     twist_ramped_angular = 0.0;
