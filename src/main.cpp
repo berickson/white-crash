@@ -595,6 +595,11 @@ class ForceCharacterizationMode;
 extern ForceCharacterizationMode force_char_mode;
 void set_force_char_ground_mode(bool ground);
 
+// Forward declaration for accel characterization
+class AccelCharacterizationMode;
+extern AccelCharacterizationMode accel_char_mode;
+bool configure_accel_test(float start_velocity, float pwm_level);
+
 // Forward declaration for wall approach test
 void configure_wall_test(float target_dist, float max_speed, float accel, float decel, float safety_dist);
 
@@ -664,6 +669,24 @@ void command_callback(const void *msgin) {
     } else {
       snprintf(response, sizeof(response), 
                "ERROR: Usage: wall-test <target_dist> [max_speed] [accel] [decel] [safety_dist]");
+    }
+    logf("REPL: %s", response);
+  }
+  // Command: accel-test <start_velocity> <pwm_level>
+  // Example: accel-test 0.0 0.35
+  else if (strncmp(msg->data.data, "accel-test ", 11) == 0) {
+    float start_velocity, pwm_level;
+    int parsed = sscanf(msg->data.data + 11, "%f %f", &start_velocity, &pwm_level);
+    
+    if (parsed == 2) {
+      if (configure_accel_test(start_velocity, pwm_level)) {
+        snprintf(response, sizeof(response), "OK: Configured accel-test v0=%.2f pwm=%.2f", 
+                 start_velocity, pwm_level);
+      } else {
+        snprintf(response, sizeof(response), "ERROR: Invalid accel-test params");
+      }
+    } else {
+      snprintf(response, sizeof(response), "ERROR: Usage: accel-test <start_velocity> <pwm_level>");
     }
     logf("REPL: %s", response);
   }
@@ -1147,50 +1170,45 @@ void update_compass_calibration(int min_x, int max_x, int min_y, int max_y, int 
 }
 
 //////////////////////////////////
-// PI Controller for Speed Control
+// Acceleration Controller for Speed Control
+// See revised_control_plan.md for architecture description.
+//
+// Architecture: the controller computes a DESIRED ACCELERATION from
+// target velocity, actual velocity, and the trajectory's acceleration.
+// A separate "unified control function" then maps (v_current, a_desired)
+// to motor commands (PWM or brake) using the characterized models.
+//
+// a_desired = SP_A + K_p * (SP_V - PV_V) + K_i * integral(E_V)
 
-/**
- * PI Controller with Feedforward for velocity control.
- * Outputs voltage command from target velocity, actual velocity, and time delta.
- * Uses feedforward model from Step 1 characterization plus PI correction.
- */
-class PIController {
+class AccelController {
  private:
-  // Feedforward model parameters (from Step 1 characterization)
-  // V_ff(v) = ff_offset + ff_gain * v
-  const float ff_offset = 0.271;  // Volts
-  const float ff_gain = 1.800;    // V/(m/s)
-  
-  // Acceleration feedforward gain (Phase 3B)
-  float ff_accel = 0.4;  // V/(m/s²) - reduced significantly, was causing overshoot during acceleration
-  
-  // PI gains (tuned from tracking data)
-  float k_p = 4.0;   // V/(m/s) - HIGH for aggressive braking during deceleration
-  float k_i = 3.0;    // V/(m/s²) - disabled to prevent oscillations
+  // PI gains — now in acceleration units
+  //   k_p: (m/s²) per (m/s) velocity error = 1/s
+  //   k_i: (m/s²) per (m·s) integrated error = 1/s²
+  float k_p = 3.0;   // 1/s — 1 m/s error → 3 m/s² correction
+  float k_i = 1.5;   // 1/s² — steady-state error elimination
   
   // Controller state
-  float error_integral = 0.0;  // Accumulated error (m·s)
+  float error_integral = 0.0;  // Accumulated velocity error (m·s)
   float last_target_sign = 0.0; // Track sign changes to reset integral
   
-  // Anti-windup limits
-  const float max_voltage = 12.0;  // Volts
-  const float min_voltage = -12.0; // Volts
-  const float max_integral = 1.0;  // Max accumulated error (m·s) - limits integral windup
+  // Anti-windup limits (in acceleration units)
+  const float max_accel_output = 6.0;  // m/s² — max total desired accel
+  const float max_integral = 1.0;       // m·s — limits integral windup
   
  public:
-  PIController() {}
+  AccelController() {}
   
   /**
-   * Compute control output.
+   * Compute desired acceleration for one wheel.
    * @param v_target Target velocity (m/s)
    * @param v_actual Actual velocity from speedometer (m/s)
    * @param dt Time step (seconds)
-   * @param accel_target Expected acceleration (m/s²) for feedforward, default 0.0
-   * @return Voltage command (Volts)
+   * @param accel_setpoint Trajectory acceleration (m/s²) — the SP_A term
+   * @return Desired acceleration (m/s²)
    */
-  float compute(float v_target, float v_actual, float dt, float accel_target = 0.0) {
+  float compute(float v_target, float v_actual, float dt, float accel_setpoint = 0.0) {
     // Reset integral if target changes sign (forward ↔ reverse)
-    // This prevents accumulated error from one direction affecting the other
     float current_target_sign = (v_target > 0.01) ? 1.0 : ((v_target < -0.01) ? -1.0 : 0.0);
     if (last_target_sign != 0.0 && current_target_sign != 0.0 && 
         last_target_sign != current_target_sign) {
@@ -1198,53 +1216,30 @@ class PIController {
     }
     last_target_sign = current_target_sign;
     
-    // Reset integral if target is near zero (stopped) to prevent drift
-    if (abs(v_target) < 0.01) {
-      error_integral = 0.0;
-    }
-    
-    // Feedforward term - handles most of the steady-state control
-    // For reverse motion, the offset must be negative
-    float v_feedforward;
-    if (v_target >= 0) {
-      v_feedforward = ff_offset + ff_gain * v_target;
-    } else {
-      v_feedforward = -ff_offset + ff_gain * v_target;
-    }
-    
-    // PI correction
+    // Velocity error
     float error = v_target - v_actual;
-    error_integral += error * dt;
     
-    // Clamp integral to prevent unbounded growth
+    // Integrate error
+    error_integral += error * dt;
     error_integral = constrain(error_integral, -max_integral, max_integral);
     
-    float v_pi = k_p * error + k_i * error_integral;
-    
-    // Acceleration feedforward term
-    float v_accel = ff_accel * accel_target;
-    
-    // Total voltage command
-    float v_total = v_feedforward + v_accel + v_pi;
+    // Desired acceleration = trajectory accel + PI correction on velocity
+    float a_desired = accel_setpoint + k_p * error + k_i * error_integral;
     
     // Anti-windup: back-calculate integral if output saturates
-    // This prevents integral from growing while output is clamped
-    if (v_total > max_voltage) {
-      v_total = max_voltage;
-      // Back-calculate what integral should be at saturation
-      float max_pi = v_total - v_feedforward;
-      error_integral = (max_pi - k_p * error) / k_i;
-    } else if (v_total < min_voltage) {
-      v_total = min_voltage;
-      float min_pi = v_total - v_feedforward;
-      error_integral = (min_pi - k_p * error) / k_i;
+    if (a_desired > max_accel_output) {
+      a_desired = max_accel_output;
+      error_integral = (a_desired - accel_setpoint - k_p * error) / k_i;
+    } else if (a_desired < -max_accel_output) {
+      a_desired = -max_accel_output;
+      error_integral = (a_desired - accel_setpoint - k_p * error) / k_i;
     }
     
-    return v_total;
+    return a_desired;
   }
   
   /**
-   * Reset controller state (e.g., when starting control)
+   * Reset controller state (e.g., when starting/stopping control)
    */
   void reset() {
     error_integral = 0.0;
@@ -1252,24 +1247,17 @@ class PIController {
   }
   
   /**
-   * Set controller gains (for tuning)
+   * Set controller gains (for tuning via command REPL)
    */
   void set_gains(float p, float i) {
     k_p = p;
     k_i = i;
   }
-  
-  /**
-   * Set acceleration feedforward gain (for tuning)
-   */
-  void set_accel_gain(float accel_ff) {
-    ff_accel = accel_ff;
-  }
 };
 
-// Instantiate PI controllers for left and right wheels
-PIController left_wheel_controller;
-PIController right_wheel_controller;
+// Instantiate acceleration controllers for left and right wheels
+AccelController left_wheel_controller;
+AccelController right_wheel_controller;
 
 // Motor mode tracking for telemetry
 // 0=coast, 1=forward PWM, 2=brake
@@ -1372,6 +1360,86 @@ float velocity_for_distance(float d, float c0, float c1, float max_v) {
   }
   
   return v;
+}
+
+//////////////////////////////////
+// Accel-to-Voltage Model (from ground characterization 2026-02-08)
+// V_motor = c0 + c1 * v + c2 * a
+// See revised_control_plan.md "Characterization Results" for derivation.
+
+const float accel_model_c0 = 0.412f;  // Volts — static friction
+const float accel_model_c1 = 2.600f;  // V/(m/s) — back-EMF + dynamic friction
+const float accel_model_c2 = 0.850f;  // V/(m/s²) — inertia term
+
+/**
+ * Compute motor voltage needed to achieve a desired acceleration at a given velocity.
+ * Uses the characterized model: V = c0 + c1*v + c2*a
+ * For reverse motion, c0 sign is flipped.
+ * @param v_current Current velocity (m/s)
+ * @param a_needed Net acceleration the motor must provide (m/s²)
+ *                 (above what coast friction already provides)
+ * @return Motor voltage (Volts)
+ */
+float model_accel_to_voltage(float v_current, float a_needed) {
+  // The model was characterized for forward motion.
+  // Static friction opposes motion direction.
+  float sign = (v_current >= 0) ? 1.0f : -1.0f;
+  return sign * accel_model_c0 + accel_model_c1 * v_current + accel_model_c2 * a_needed;
+}
+
+/**
+ * Unified Control Function — the core of the revised control strategy.
+ * Takes current velocity and desired acceleration, returns motor command.
+ * 
+ * Architecture (from revised_control_plan.md):
+ *   1. Predict passive decel from coast model
+ *   2. Compute net actuation needed = a_desired - a_coast
+ *   3. If need more decel than coast → brake
+ *   4. Otherwise → forward PWM via accel-to-voltage model
+ *
+ * @param v_current Current wheel velocity (m/s)
+ * @param a_desired Desired acceleration (m/s²), negative = decelerate
+ * @param[out] pwm_out PWM command [-1, 1] (only valid if use_brake is false)
+ * @param[out] brake_intensity_out Brake intensity [0, 1] (only valid if use_brake is true)
+ * @param[out] use_brake Whether to use braking (true) or PWM (false)
+ */
+void control_from_velocity_and_accel(float v_current, float a_desired,
+                                      float &pwm_out, float &brake_intensity_out,
+                                      bool &use_brake) {
+  float v_abs = fabs(v_current);
+  
+  // 1. Predict passive deceleration from coast model (always positive, opposes motion)
+  float a_coast = -(coast_model.c0 + coast_model.c1 * v_abs);  // negative = decelerating
+  
+  // 2. Net acceleration the actuator must provide
+  //    a_desired already includes trajectory + PI correction
+  //    a_coast is what we get "for free" — subtract it to find what the motor must do
+  float a_needed = a_desired - a_coast;
+  
+  // 3. If a_needed < 0, we need MORE deceleration than coast provides → brake
+  if (a_needed < 0) {
+    // Convert the extra decel magnitude to brake intensity
+    // compute_brake_intensity expects positive decel and positive velocity
+    float extra_decel = -a_needed;  // positive magnitude
+    float intensity = compute_brake_intensity(
+        coast_model.c0 + coast_model.c1 * v_abs + extra_decel, v_abs);
+    brake_intensity_out = constrain(intensity, 0.0f, 1.0f);
+    pwm_out = 0.0f;
+    use_brake = true;
+    return;
+  }
+  
+  // 4. Need positive actuation → compute voltage via characterized model
+  float voltage = model_accel_to_voltage(v_current, a_needed);
+  
+  // Convert to PWM
+  if (!isnan(v_bat) && v_bat > 0.1f) {
+    pwm_out = constrain(voltage / v_bat, -1.0f, 1.0f);
+  } else {
+    pwm_out = 0.0f;
+  }
+  brake_intensity_out = 0.0f;
+  use_brake = false;
 }
 
 //////////////////////////////////
@@ -1601,36 +1669,58 @@ void disable_twist_control() {
 /**
  * Update twist control loop.
  * Reads from twist_target_linear and twist_target_angular globals.
- * Runs PI controllers and applies motor commands.
+ * Uses acceleration-based control: computes desired acceleration per wheel,
+ * then routes through unified control function to produce PWM or brake.
  * Called automatically from main loop at 10ms intervals when twist_control_enabled.
+ *
+ * Two modes (see revised_control_plan.md):
+ *   Moving:   a_desired = SP_A + K_p * E_V + K_i * integral(E_V)
+ *             → control_from_velocity_and_accel() → PWM or brake
+ *   Stopping: target ≈ 0 AND velocity very low → coast/brake only, no forward PWM
  */
 void update_twist_control() {
-  // Deadband: if targets are near zero, stop motors.
-  // If deceleration is commanded, use brakes; otherwise coast.
-  const float target_deadband = 0.01; // 0.01 m/s or 0.01 rad/s
-  if (abs(twist_target_linear) < target_deadband && abs(twist_target_angular) < target_deadband) {
-    if (twist_target_accel_linear < -0.1f) {
-      // Deceleration commanded with zero velocity target - apply brakes
-      float desired_decel = -twist_target_accel_linear;
-      float v_avg = (fabs(left_speedometer.get_velocity()) + fabs(right_speedometer.get_velocity())) / 2.0f;
-      float intensity = compute_brake_intensity(desired_decel, v_avg);
+  // Get actual velocities from speedometers
+  float v_left_actual = left_speedometer.get_velocity();
+  float v_right_actual = right_speedometer.get_velocity();
+  float v_avg = (fabs(v_left_actual) + fabs(v_right_actual)) / 2.0f;
+  
+  // === STOPPING REGIME ===
+  // When target is near zero AND we are already very slow, only coast/brake.
+  // This prevents jitter and forward PWM pulses near zero.
+  const float stop_v_target_threshold = 0.01f;  // m/s — target considered "stop"
+  const float stop_v_actual_threshold = 0.08f;   // m/s — actual speed considered "very slow"
+  
+  bool stopping = (fabs(twist_target_linear) < stop_v_target_threshold &&
+                   fabs(twist_target_angular) < stop_v_target_threshold &&
+                   v_avg < stop_v_actual_threshold);
+  
+  if (stopping) {
+    // In stopping regime: only coast or brake, never forward PWM.
+    if (v_avg > 0.02f) {
+      // Still have some velocity — brake to stop
+      float decel = coast_model.c0 + coast_model.c1 * v_avg;
+      float intensity = compute_brake_intensity(decel * 1.5f, v_avg);  // Brake harder than coast
       intensity = constrain(intensity, 0.0f, 1.0f);
       left_motor.brake(intensity);
       right_motor.brake(intensity);
       left_motor_mode = 2;
       right_motor_mode = 2;
     } else {
-      // No deceleration intent - coast
+      // Effectively stopped — coast (no active braking needed)
       left_motor.go(0);
       right_motor.go(0);
       left_motor_mode = 0;
       right_motor_mode = 0;
     }
-    // Also reset ramped state to prevent jump when command arrives
+    // Reset controller state to prevent windup/jump when motion resumes
     twist_ramped_linear = 0.0;
     twist_ramped_angular = 0.0;
+    left_wheel_controller.reset();
+    right_wheel_controller.reset();
     return;
   }
+  
+  // === MOVING REGIME ===
   
   // Measure actual time step for accurate integration
   static unsigned long last_call_millis = 0;
@@ -1688,15 +1778,12 @@ void update_twist_control() {
   }
   
   // Get measured angular velocity from BNO055 gyroscope (Z-axis)
-  // bno_gyro_dps is now read in i2c_sensor_thread - read with mutex protection
-  // Convert from deg/s to rad/s
   float measured_angular_vel;
   xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
   measured_angular_vel = bno_gyro_dps.z() * (M_PI / 180.0);
   xSemaphoreGive(sensor_data_mutex);
   
   // Apply differential drive kinematics with angular velocity PI feedback
-  // Use ramped targets for smooth motion
   float v_left_target, v_right_target;
   diff_drive_kinematics(twist_ramped_linear, twist_ramped_angular, measured_angular_vel, dt, v_left_target, v_right_target);
   
@@ -1708,107 +1795,52 @@ void update_twist_control() {
   v_left_target_effective = v_left_target;
   v_right_target_effective = v_right_target;
   
-  // Get actual velocities from speedometers
-  float v_left_actual = left_speedometer.get_velocity();
-  float v_right_actual = right_speedometer.get_velocity();
-  
-  // Compute linear accelerations for each wheel from differential drive
-  // accel_left/right ≈ effective_linear_accel ± (effective_angular_accel * track_width / 2)
+  // Compute per-wheel acceleration setpoints from differential drive
   float accel_left = effective_linear_accel - (effective_angular_accel * track_width / 2.0);
   float accel_right = effective_linear_accel + (effective_angular_accel * track_width / 2.0);
   
-  // Compute voltage commands via PI controllers with acceleration feedforward
-  float v_left_cmd = left_wheel_controller.compute(v_left_target, v_left_actual, dt, accel_left);
-  float v_right_cmd = right_wheel_controller.compute(v_right_target, v_right_actual, dt, accel_right);
+  // === ACCELERATION CONTROLLER ===
+  // Compute desired acceleration per wheel: a_desired = SP_A + K_p * E_V + K_i * ∫E_V
+  float a_desired_left = left_wheel_controller.compute(v_left_target, v_left_actual, dt, accel_left);
+  float a_desired_right = right_wheel_controller.compute(v_right_target, v_right_actual, dt, accel_right);
   
-  // Convert voltage to PWM
-  float pwm_left = 0.0;
-  float pwm_right = 0.0;
+  // === UNIFIED CONTROL FUNCTION ===
+  // Map (v_current, a_desired) → motor command via characterized models
+  float pwm_left, pwm_right;
+  float brake_left, brake_right;
+  bool use_brake_left, use_brake_right;
   
-  if (!isnan(v_bat) && v_bat > 0.1) {
-    pwm_left = v_left_cmd / v_bat;
-    pwm_right = v_right_cmd / v_bat;
-    
-    // Clamp to valid PWM range [-1, 1]
-    pwm_left = constrain(pwm_left, -1.0, 1.0);
-    pwm_right = constrain(pwm_right, -1.0, 1.0);
+  control_from_velocity_and_accel(v_left_actual, a_desired_left,
+                                   pwm_left, brake_left, use_brake_left);
+  control_from_velocity_and_accel(v_right_actual, a_desired_right,
+                                   pwm_right, brake_right, use_brake_right);
+  
+  // Debug logging (every 500ms when braking or large accel)
+  static unsigned long last_ctrl_debug = 0;
+  if ((use_brake_left || use_brake_right || fabs(a_desired_left) > 2.0f) && 
+      millis() - last_ctrl_debug > 500) {
+    logf("CTRL: aL=%.2f aR=%.2f vL=%.2f vR=%.2f brkL=%d(%.2f) brkR=%d(%.2f) pwmL=%.2f pwmR=%.2f",
+         a_desired_left, a_desired_right, v_left_actual, v_right_actual,
+         use_brake_left, brake_left, use_brake_right, brake_right,
+         pwm_left, pwm_right);
+    last_ctrl_debug = millis();
   }
 
-  // Model-based braking decision:
-  // Only use active brakes when we need MORE deceleration than coast provides.
-  // Otherwise, just use PI controller (which will reduce PWM naturally).
-  //
-  // Use brakes when:
-  //   1. Explicit negative acceleration is commanded (accel < 0)
-  //   2. AND that deceleration exceeds what coast friction provides
-  //
-  // If accel_target == 0, PI controller handles velocity tracking with natural coast.
-  
-  // Left wheel
-  bool use_brake_left = false;
-  float brake_intensity_left = 0.0f;
-  
-  if (accel_left < -0.1f && fabs(v_left_actual) > 0.02f) {
-    // Explicit deceleration commanded - check if we need active braking
-    float desired_decel = -accel_left;
-    float coast_decel = coast_model.c0 + coast_model.c1 * fabs(v_left_actual);
-    
-    if (desired_decel > coast_decel * 0.9f) {  // Use 90% threshold for hysteresis
-      // Need more braking than coast provides
-      brake_intensity_left = compute_brake_intensity(desired_decel, v_left_actual);
-      use_brake_left = (brake_intensity_left >= 0);
-    }
-  }
-  
-  // Right wheel
-  bool use_brake_right = false;
-  float brake_intensity_right = 0.0f;
-  
-  if (accel_right < -0.1f && fabs(v_right_actual) > 0.02f) {
-    // Explicit deceleration commanded - check if we need active braking
-    float desired_decel = -accel_right;
-    float coast_decel = coast_model.c0 + coast_model.c1 * fabs(v_right_actual);
-    
-    if (desired_decel > coast_decel * 0.9f) {  // Use 90% threshold for hysteresis
-      // Need more braking than coast provides
-      brake_intensity_right = compute_brake_intensity(desired_decel, v_right_actual);
-      use_brake_right = (brake_intensity_right >= 0);
-    }
-  }
-  
-  // Debug logging for brake decisions (every 500ms when decelerating)
-  static unsigned long last_brake_debug = 0;
-  if ((accel_left < -0.1f || accel_right < -0.1f) && millis() - last_brake_debug > 500) {
-    logf("BRAKE: a_L=%.2f a_R=%.2f v_L=%.2f v_R=%.2f brake_L=%d(%.2f) brake_R=%d(%.2f)",
-         accel_left, accel_right, v_left_actual, v_right_actual,
-         use_brake_left, brake_intensity_left, use_brake_right, brake_intensity_right);
-    last_brake_debug = millis();
-  }
-
-  // Apply motor commands and track mode for telemetry
-  // motor_command (from get_setpoint) will reflect the value passed to go() or brake()
+  // Apply motor commands
   if (use_brake_left) {
-    float intensity = constrain(brake_intensity_left, 0.0f, 1.0f);
-    left_motor.brake(intensity);  // setpoint = intensity
+    left_motor.brake(brake_left);
     left_motor_mode = 2;  // brake mode
-    // Reset PI integrator to prevent windup during braking
-    left_wheel_controller.reset();
   } else {
-    // Use PI controller output (handles accel, maintain, and gentle decel)
-    left_motor.go(pwm_left, false);  // setpoint = pwm_left
-    left_motor_mode = (fabs(pwm_left) > 0.01f) ? 1 : 0;  // forward/reverse or coast
+    left_motor.go(pwm_left, false);
+    left_motor_mode = (fabs(pwm_left) > 0.01f) ? 1 : 0;
   }
   
   if (use_brake_right) {
-    float intensity = constrain(brake_intensity_right, 0.0f, 1.0f);
-    right_motor.brake(intensity);  // setpoint = intensity
+    right_motor.brake(brake_right);
     right_motor_mode = 2;  // brake mode
-    // Reset PI integrator to prevent windup during braking
-    right_wheel_controller.reset();
   } else {
-    // Use PI controller output (handles accel, maintain, and gentle decel)
-    right_motor.go(pwm_right, false);  // setpoint = pwm_right
-    right_motor_mode = (fabs(pwm_right) > 0.01f) ? 1 : 0;  // forward/reverse or coast
+    right_motor.go(pwm_right, false);
+    right_motor_mode = (fabs(pwm_right) > 0.01f) ? 1 : 0;
   }
 }
 
@@ -2540,6 +2572,253 @@ void set_force_char_ground_mode(bool ground) {
 
 
 /**
+ * AccelCharacterizationMode - Characterize acceleration vs PWM vs velocity
+ * 
+ * Applies open-loop PWM steps at various starting velocities to collect
+ * (velocity, pwm, acceleration, battery_voltage) data for fitting the
+ * inverse model: pwm = f(v, a_desired).
+ * 
+ * For start_velocity > 0: uses twist control to reach target, then steps to
+ * open-loop PWM. For start_velocity == 0: applies PWM immediately from rest.
+ * 
+ * Ground-only: TOF safety at 500mm, velocity-based completion.
+ * RC override (rc-moved) returns to hand mode at any time.
+ * 
+ * Trigger: "accel-char" FSM event from hand mode
+ * Configure: Use ROS command "accel-test <start_velocity> <pwm_level>" before triggering
+ */
+class AccelCharacterizationMode : public Task {
+public:
+  enum State {
+    idle,
+    accelerating,     // Getting to start_velocity via twist control
+    settling,         // Brief settle at target velocity
+    testing,          // Open-loop PWM applied, recording data
+    complete
+  };
+
+  float start_velocity = 0.0;  // m/s - velocity to reach before applying PWM step
+  float pwm_level = 0.0;       // PWM to apply during test phase [-1, 1]
+  bool configured = false;
+  bool emergency_stopped = false;
+
+  State state = idle;
+  unsigned long state_start_time = 0;
+
+  // Timing
+  unsigned long accel_timeout_ms = 5000;
+  unsigned long settle_time_ms = 500;       // Brief settle before step
+  unsigned long test_duration_ms = 3000;    // Max recording time
+  
+  // Safety
+  const float tof_safety_distance_mm = 500.0;
+  const float stopped_velocity = 0.03;         // m/s
+  const float velocity_tolerance = 0.05;       // m/s
+
+  AccelCharacterizationMode() {
+    name = "accel-char";
+  }
+
+  bool configure(float velocity, float pwm) {
+    start_velocity = velocity;
+    pwm_level = pwm;
+    configured = true;
+    logf("Configured accel test: start_v=%.2f, pwm=%.2f", velocity, pwm);
+    return true;
+  }
+
+  const char* get_state_string() {
+    switch (state) {
+      case idle: return "idle";
+      case accelerating: return "accelerating";
+      case settling: return "settling";
+      case testing: return "testing";
+      case complete: return "complete";
+      default: return "unknown";
+    }
+  }
+
+  bool tof_safety_triggered() {
+    float center_dist;
+    xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
+    center_dist = tof_center.distance * 1000.0;  // Convert to mm
+    xSemaphoreGive(sensor_data_mutex);
+    
+    if (!isnan(center_dist) && center_dist < tof_safety_distance_mm) {
+      logf("TOF SAFETY: Wall at %.0f mm, stopping test!", center_dist);
+      return true;
+    }
+    return false;
+  }
+
+  bool at_target_velocity() {
+    float avg_velocity = (left_speedometer.get_velocity() + right_speedometer.get_velocity()) / 2.0;
+    if (start_velocity > 0) {
+      return avg_velocity >= (start_velocity - velocity_tolerance);
+    }
+    return true;  // start_velocity == 0 means no acceleration needed
+  }
+
+  bool is_stopped() {
+    float avg_velocity = fabs(left_speedometer.get_velocity()) + fabs(right_speedometer.get_velocity());
+    return avg_velocity / 2.0 < stopped_velocity;
+  }
+
+  virtual void begin() override {
+    if (!configured) {
+      logf("ERROR: No accel test configured, use 'accel-test <start_velocity> <pwm>' first");
+      state = complete;
+      return;
+    }
+    
+    logf("Accel test begin: start_v=%.2f, pwm=%.2f", start_velocity, pwm_level);
+    emergency_stopped = false;
+    state_start_time = millis();
+    
+    if (start_velocity < 0.05) {
+      // Starting from standstill - go straight to testing
+      logf("Starting from standstill, applying PWM immediately");
+      disable_twist_control();
+      left_motor.go(pwm_level);
+      right_motor.go(pwm_level);
+      state = testing;
+    } else {
+      // Need to reach start_velocity first
+      enable_twist_control();
+      float accel_target = start_velocity * 1.3;
+      set_twist_target(accel_target, 0.0, 0.0, 0.0);
+      state = accelerating;
+      logf("Accelerating to %.2f m/s with twist control", start_velocity);
+    }
+  }
+
+  virtual void execute() override {
+    if (state == complete || state == idle) {
+      set_done();
+      return;
+    }
+
+    unsigned long elapsed = millis() - state_start_time;
+
+    // Debug log every 500ms
+    static unsigned long last_debug_log = 0;
+    if (millis() - last_debug_log > 500) {
+      float avg_v = (left_speedometer.get_velocity() + right_speedometer.get_velocity()) / 2.0;
+      logf("AC state=%s, v=%.2f, pwm=%.2f, elapsed=%lu",
+           get_state_string(), avg_v, pwm_level, elapsed);
+      last_debug_log = millis();
+    }
+
+    switch (state) {
+      case accelerating:
+        if (tof_safety_triggered()) {
+          logf("ABORT: TOF safety during acceleration");
+          left_motor.brake(1.0);
+          right_motor.brake(1.0);
+          emergency_stopped = true;
+          state = complete;
+          set_done();
+          break;
+        }
+        
+        if (at_target_velocity()) {
+          logf("Target velocity reached, settling...");
+          state = settling;
+          state_start_time = millis();
+        } else if (elapsed > accel_timeout_ms) {
+          logf("WARNING: Acceleration timeout, proceeding anyway");
+          state = settling;
+          state_start_time = millis();
+        }
+        break;
+
+      case settling:
+        if (tof_safety_triggered()) {
+          logf("ABORT: TOF safety during settling");
+          left_motor.brake(1.0);
+          right_motor.brake(1.0);
+          emergency_stopped = true;
+          state = complete;
+          set_done();
+          break;
+        }
+        
+        if (elapsed >= settle_time_ms) {
+          logf("Settled, applying open-loop PWM=%.2f", pwm_level);
+          disable_twist_control();
+          left_motor.go(pwm_level);
+          right_motor.go(pwm_level);
+          state = testing;
+          state_start_time = millis();
+        }
+        break;
+
+      case testing: {
+        if (tof_safety_triggered()) {
+          logf("ABORT: TOF safety during testing");
+          left_motor.brake(1.0);
+          right_motor.brake(1.0);
+          emergency_stopped = true;
+          state = complete;
+          set_done();
+          break;
+        }
+        
+        bool time_complete = elapsed >= test_duration_ms;
+        
+        // For step-down tests (pwm < current coast): complete if stopped
+        bool velocity_complete = is_stopped() && elapsed > 200;
+        
+        if (time_complete || velocity_complete) {
+          logf("Test complete (%s, %.1fs)", 
+               velocity_complete ? "velocity" : "time", elapsed / 1000.0);
+          left_motor.go(0.0);
+          right_motor.go(0.0);
+          state = complete;
+          set_done();
+        }
+        break;
+      }
+
+      case idle:
+      case complete:
+        set_done();
+        break;
+    }
+  }
+
+  virtual void end() override {
+    logf("Accel test end");
+    disable_twist_control();
+    
+    if (emergency_stopped) {
+      logf("E-STOP: Keeping brakes applied!");
+      left_motor.brake(1.0);
+      right_motor.brake(1.0);
+    } else {
+      left_motor.go(0.0);
+      right_motor.go(0.0);
+    }
+    
+    configured = false;
+    state = idle;
+    emergency_stopped = false;
+  }
+
+  virtual void get_display_string(char * buffer, int buffer_size) override {
+    snprintf(buffer, buffer_size, "AC:%s v0=%.1f pwm=%.2f", 
+             get_state_string(), start_velocity, pwm_level);
+  }
+
+} accel_char_mode;
+
+// Implementation of forward-declared function for accel characterization
+bool configure_accel_test(float start_velocity, float pwm_level) {
+  return accel_char_mode.configure(start_velocity, pwm_level);
+}
+
+
+/**
  * WallApproachTestMode - Test precise wall approach using model-based braking
  * 
  * Uses characterized brake models to compute constant-deceleration trajectory
@@ -3110,6 +3389,7 @@ std::vector<Task *> tasks = {
     &open_loop_characterization_mode,
     &pi_control_test_mode,
     &force_char_mode,
+    &accel_char_mode,
     &wall_approach_mode,
     &cmd_vel_auto_mode,
     &waypoint_following_mode,
@@ -3154,6 +3434,12 @@ std::vector<Fsm::Edge> edges = {
     Fsm::Edge("force-char", "done", "hand"),
     Fsm::Edge("force-char", "rc-moved", "hand"),
     Fsm::Edge("force-char", "hand", "hand"),  // Allow explicit return to hand
+    
+    // Accel characterization mode (ground only)
+    Fsm::Edge("hand", "accel-char", "accel-char"),
+    Fsm::Edge("accel-char", "done", "hand"),
+    Fsm::Edge("accel-char", "rc-moved", "hand"),
+    Fsm::Edge("accel-char", "hand", "hand"),  // Allow explicit return to hand
     
     // Wall approach test mode
     Fsm::Edge("hand", "wall-test", "wall-test"),

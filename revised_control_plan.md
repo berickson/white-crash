@@ -82,6 +82,67 @@ Goal: build a learned model $V = f(v, a)$ so `model_accel_to_voltage()` can pred
 **Validation**
 - Re-run ramps at intermediate rates and verify accel tracking within 5–10% without slip.
 
+## Characterization Results (2026-02-08)
+
+### Test Summary
+
+10 ground tests were run with open-loop PWM steps at various starting velocities.
+Data collected in `test_outputs/accel_char_2026_02_08_16_22_03/`.
+
+| Test | Start v (m/s) | PWM  | Peak v (m/s) | Points | Slip % | Notes            |
+|------|---------------|------|--------------|--------|--------|------------------|
+| 1    | 0.0           | 0.15 | 0.44         | 33     | 0.0%   | Gentle accel     |
+| 2    | 0.0           | 0.25 | 0.81         | 25     | 0.0%   | Low-mid          |
+| 3    | 0.0           | 0.35 | 1.21         | 18     | 5.6%   | Mid              |
+| 4    | 0.0           | 0.50 | 1.81         | 17     | 11.8%  | Near slip boundary |
+| 5    | 0.5           | 0.70 | 2.67         | 25     | 20.0%  | Step-up from slow |
+| 6    | 0.5           | 0.30 | 1.03         | 30     | 0.0%   | Partial power    |
+| 7    | 1.0           | 0.80 | 2.09         | 26     | 0.0%   | Full power from cruising |
+| 8    | 1.0           | 0.30 | 1.18         | 24     | 0.0%   | Step-down        |
+| 9    | 1.5           | 0.40 | 1.76         | 28     | 0.0%   | Step-down from fast |
+| 10   | 0.7           | 0.50 | 1.80         | 27     | 0.0%   | Mid-range fill   |
+
+**Totals:** 253 data points, 8 flagged as slip (3.2%). Slip threshold: |encoder_accel − IMU_accel| > 3.0 m/s².
+
+### Fitted Model
+
+After gating out slip samples, the linear model was fitted to 245 points:
+
+$$V_{motor} = c_0 + c_1 \cdot v + c_2 \cdot a$$
+
+where:
+- $V_{motor}$ = motor voltage (Volts) = `pwm × V_battery`
+- $v$ = current wheel velocity (m/s)
+- $a$ = current acceleration (m/s²)
+
+| Coefficient | Value  | Std Error | Physical Meaning |
+|-------------|--------|-----------|------------------|
+| $c_0$       | 0.412 V | ±0.118   | **Static friction voltage** — voltage needed to overcome friction from standstill |
+| $c_1$       | 2.600 V/(m/s) | ±0.124 | **Back-EMF + dynamic friction** — voltage per unit velocity (dominated by motor back-EMF) |
+| $c_2$       | 0.850 V/(m/s²) | ±0.052 | **Inertia term** — voltage per unit acceleration (reflects effective mass of robot) |
+
+**RMSE:** 1.03 V (~13% of typical 8V battery)
+
+### Comparison to Previous Hand-Tuned Values
+
+| Parameter | Old (hand-tuned) | New (data-driven) | Notes |
+|-----------|------------------|--------------------|-------|
+| Static friction (`ff_offset`) | 0.271 V | 0.412 V | Old was from rack tests; ground friction is higher |
+| Back-EMF slope (`ff_gain`) | 1.800 V/(m/s) | 2.600 V/(m/s) | Ground adds rolling resistance proportional to speed |
+| Accel feedforward (`ff_accel`) | 0.400 V/(m/s²) | 0.850 V/(m/s²) | Old was a guess; data shows ~2× more voltage needed per unit accel |
+
+### Usage in Control
+
+At runtime, the feedforward voltage for a target velocity $v_{target}$ and desired acceleration $a_{desired}$ is:
+
+$$V_{ff} = c_0 + c_1 \cdot v_{target} + c_2 \cdot a_{desired}$$
+
+Then convert to PWM:
+
+$$pwm = V_{ff} / V_{battery}$$
+
+The PI correction terms then handle residual tracking error on top of this feedforward.
+
 ## Archive References (Prior Plans)
 
 These plans are archived to avoid confusion but remain useful for historical context and test procedures:
