@@ -1408,28 +1408,44 @@ void control_from_velocity_and_accel(float v_current, float a_desired,
                                       bool &use_brake) {
   float v_abs = fabs(v_current);
   
-  // 1. Predict passive deceleration from coast model (always positive, opposes motion)
-  float a_coast = -(coast_model.c0 + coast_model.c1 * v_abs);  // negative = decelerating
+  // 1. Predict passive deceleration from coast model.
+  //    Friction always opposes motion: negative accel when moving forward,
+  //    positive accel when moving backward, zero when stopped.
+  float coast_mag = coast_model.c0 + coast_model.c1 * v_abs;  // always positive magnitude
+  float a_coast;
+  const float v_near_zero = 0.02f;
+  if (v_current > v_near_zero) {
+    a_coast = -coast_mag;   // friction decelerates forward motion
+  } else if (v_current < -v_near_zero) {
+    a_coast = coast_mag;    // friction decelerates backward motion
+  } else {
+    a_coast = 0.0f;         // at rest, no friction effect
+  }
   
   // 2. Net acceleration the actuator must provide
-  //    a_desired already includes trajectory + PI correction
   //    a_coast is what we get "for free" — subtract it to find what the motor must do
   float a_needed = a_desired - a_coast;
   
-  // 3. If a_needed < 0, we need MORE deceleration than coast provides → brake
-  if (a_needed < 0) {
+  // 3. Decide: brake or PWM?
+  //    Braking can only oppose existing motion (reduce |v|). It cannot start motion
+  //    in the other direction. So only brake when:
+  //    - We're actually moving (|v| > threshold), AND
+  //    - The needed torque opposes the current direction of travel
+  bool should_brake = (fabs(v_current) > v_near_zero) && (v_current * a_needed < 0);
+  
+  if (should_brake) {
     // Convert the extra decel magnitude to brake intensity
     // compute_brake_intensity expects positive decel and positive velocity
-    float extra_decel = -a_needed;  // positive magnitude
+    float extra_decel = fabs(a_needed);
     float intensity = compute_brake_intensity(
-        coast_model.c0 + coast_model.c1 * v_abs + extra_decel, v_abs);
+        coast_mag + extra_decel, v_abs);
     brake_intensity_out = constrain(intensity, 0.0f, 1.0f);
     pwm_out = 0.0f;
     use_brake = true;
     return;
   }
   
-  // 4. Need positive actuation → compute voltage via characterized model
+  // 4. Need active drive → compute voltage via characterized model
   float voltage = model_accel_to_voltage(v_current, a_needed);
   
   // Convert to PWM
@@ -3114,9 +3130,10 @@ public:
   float last_seen_millis = 0;
   float max_approach_velocity = 2.0;
   float max_angular_velocity = 4.0;
-  float max_accel = 2.0;
-  float last_ms = millis();
-  float last_v = 0.0;
+  float target_accel = 2.0;
+  float target_decel = 4.0;  // Use same decel as wall approach test
+  unsigned long last_diag_log_ms = 0;
+  const unsigned long diag_log_interval_ms = 200;  // Log every 200ms
 
   GoToCanMode() {
     name = "go-to-can";
@@ -3128,10 +3145,10 @@ public:
     right_servo.writeMicroseconds(servo_right_open_us);
 
     last_seen_millis = millis();
-    logf("go-to-can mode begin");
+    last_diag_log_ms = 0;
+    logf("go-to-can mode begin, goal=%.3f max_v=%.1f max_w=%.1f accel=%.1f decel=%.1f",
+         goal_distance, max_approach_velocity, max_angular_velocity, target_accel, target_decel);
     enable_twist_control();
-    last_ms = millis();
-    last_v = 0.0;
 
   }
 
@@ -3153,51 +3170,94 @@ public:
     } else {
       time_since_seen = millis() - last_seen_millis;
     }
-    logf("distance to can %.2f", min_distance);
-
-
-    const float steering_ratio = 1.5;
     const uint32_t can_lost_timout_ms = 100;
 
+    // Position tolerance: when very close, command full stop and declare done.
+    // This prevents pushing the can — we stop before contact.
+    const float position_tolerance = 0.01f;  // 10mm
+    float distance_to_target = min_distance - goal_distance;
 
-    float stop_velocity = velocity_for_stop_distance(min_distance-goal_distance, max_accel);
-
-    float accel_velocity = last_v + (millis() - last_ms) / 1000.0f * max_accel;
-
-    float approach_velocity = std::min<float>({stop_velocity, accel_velocity, max_approach_velocity});
-
-    // Determine acceleration based on which constraint is active:
-    // - stop_velocity wins → decel region → -max_accel (engage brakes)
-    // - accel_velocity wins → accelerating → +max_accel
-    // - max_approach_velocity wins → cruising → 0
-    float accel;
-    if (stop_velocity <= accel_velocity && stop_velocity <= max_approach_velocity) {
-      accel = -max_accel;  // Braking region
-    } else if (accel_velocity <= max_approach_velocity) {
-      accel = max_accel;   // Accelerating
-    } else {
-      accel = 0.0f;        // Cruising at max speed
+    if (distance_to_target <= position_tolerance) {
+      // At target — stop with braking
+      float v_current = (fabs(left_speedometer.get_velocity()) + fabs(right_speedometer.get_velocity())) / 2.0f;
+      float decel_at_v = coast_model.c0 + coast_model.c1 * v_current;
+      set_twist_target(0.0f, 0.0f, -decel_at_v, 0.0f);
+      logf("go-to-can STOP: d_target=%.3f v=%.3f decel=%.2f", distance_to_target, v_current, decel_at_v);
+      if (v_current < 0.05f) {
+        logf("go-to-can DONE: min_d=%.3f goal=%.3f err=%.3f", min_distance, goal_distance, distance_to_target);
+        set_done();
+      }
+      return;
+    } else if (time_since_seen > can_lost_timout_ms) {
+      logf("go-to-can LOST: last_seen %dms ago, min_d was %.3f", (int)time_since_seen, min_distance);
+      set_done("lost-can");
+      return;
     }
 
-    // Update for next iteration
-    last_v = approach_velocity;
-    last_ms = millis();
+    // Use velocity-dependent brake model for accurate stopping
+    // (same approach as set_approach_twist / wall approach test)
+    float v_current = (fabs(left_speedometer.get_velocity()) + fabs(right_speedometer.get_velocity())) / 2.0f;
 
-    // if any distance is close enough, we are done
-    if (min_distance <= goal_distance ) {
-      set_done();
-      logf("we are close enough to the can");
-    } else if (time_since_seen > can_lost_timout_ms) {
-        logf("lost the can, giving up");
-        set_done("lost-can");
-    } else if (center_distance == min_distance) {
-      // if center is the min distance, go there
-      set_twist_target( approach_velocity, 0, accel);
-    } else if (right_distance == min_distance) {
-      set_twist_target( approach_velocity, -max_angular_integral, accel);
+    // Compute interpolated brake model for desired decel
+    float intensity = compute_brake_intensity(target_decel, max_approach_velocity);
+    if (intensity < 0.0f) intensity = 0.0f;
+    if (intensity > 1.0f) intensity = 1.0f;
+    float curve_c0 = coast_model.c0 + intensity * (pure_brake_model.c0 - coast_model.c0);
+    float curve_c1 = coast_model.c1 + intensity * (pure_brake_model.c1 - coast_model.c1);
+
+    // Compute braking curve velocity using physics-based model
+    float v_brake = velocity_for_distance(distance_to_target, curve_c0, curve_c1, max_approach_velocity);
+    float v_target = (v_brake < max_approach_velocity) ? v_brake : max_approach_velocity;
+
+    // Determine feedforward acceleration
+    float accel;
+    const float overshoot_threshold = 0.15f;
+
+    if (v_current > v_target + overshoot_threshold) {
+      // Significantly above target - brake hard
+      accel = -(curve_c0 + curve_c1 * fabs(v_current));
+    } else if (v_brake < max_approach_velocity) {
+      // In braking region
+      float decel_at_v = curve_c0 + curve_c1 * fabs(v_current);
+      float ratio = v_current / fmaxf(v_brake, 0.01f);
+      if (ratio > 1.0f) ratio = 1.0f;
+      accel = -decel_at_v * ratio;
+    } else if (v_current < max_approach_velocity - 0.05f) {
+      // Accelerating toward max
+      accel = target_accel;
     } else {
-      // left distance must be the min, go there
-      set_twist_target( approach_velocity, max_angular_integral, accel);
+      // Cruising at max speed
+      accel = 0.0f;
+    }
+
+    // Determine angular velocity based on which sensor sees the can.
+    // Scale angular velocity with approach speed so both wheels stay positive —
+    // prevents one wheel braking while the other drives (which causes one-wheel-only turning).
+    // Max angular limited so slowest wheel >= 0: omega_max = v_target / (track_width/2)
+    float max_omega = v_target / (track_width / 2.0f);
+    // Clamp to a reasonable maximum
+    float desired_omega = fminf(max_angular_velocity, max_omega);
+
+    float angular = 0.0f;
+    if (center_distance == min_distance) {
+      angular = 0.0f;
+    } else if (right_distance == min_distance) {
+      angular = -desired_omega;
+    } else {
+      angular = desired_omega;
+    }
+
+    set_twist_target(v_target, angular, accel);
+
+    // Rate-limited diagnostic logging
+    unsigned long now = millis();
+    if (now - last_diag_log_ms >= diag_log_interval_ms) {
+      last_diag_log_ms = now;
+      const char * sensor_str = (center_distance == min_distance) ? "C" :
+                                (right_distance == min_distance) ? "R" : "L";
+      logf("GTC: d=%.3f dt=%.3f v=%.2f vt=%.2f vb=%.2f a=%.1f w=%.2f mw=%.2f s=%s",
+           min_distance, distance_to_target, v_current, v_target, v_brake,
+           accel, angular, max_omega, sensor_str);
     }
 
   }

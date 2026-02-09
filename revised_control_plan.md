@@ -133,15 +133,45 @@ where:
 
 ### Usage in Control
 
-At runtime, the feedforward voltage for a target velocity $v_{target}$ and desired acceleration $a_{desired}$ is:
+The characterized model is used inside the **Unified Control Function** (`control_from_velocity_and_accel()`), not as a standalone feedforward. The full control flow is:
 
-$$V_{ff} = c_0 + c_1 \cdot v_{target} + c_2 \cdot a_{desired}$$
+1. `AccelController` computes $a_{desired} = SP_A + K_p \cdot E_V + K_i \cdot \int E_V$
+2. Unified control function subtracts passive coast decel: $a_{needed} = a_{desired} - a_{coast}$
+3. If $a_{needed} < 0$ → brake via `compute_brake_intensity()`
+4. If $a_{needed} \geq 0$ → compute voltage: $V = c_0 + c_1 \cdot v + c_2 \cdot a_{needed}$, then $pwm = V / V_{bat}$
 
-Then convert to PWM:
+**Stopping regime:** When target ≈ 0 AND actual speed < 0.08 m/s, only coast/brake — no forward PWM.
 
-$$pwm = V_{ff} / V_{battery}$$
+## Implementation Status (2026-02-08)
 
-The PI correction terms then handle residual tracking error on top of this feedforward.
+### Architecture Implemented
+
+The revised control strategy is fully implemented in `src/main.cpp`:
+
+- **`AccelController`** class (replaces old `PIController`): outputs desired acceleration, not voltage
+  - Gains: $K_p = 3.0$ (1/s), $K_i = 1.5$ (1/s²)
+- **`control_from_velocity_and_accel()`**: unified control function per the pseudocode above
+- **`model_accel_to_voltage()`**: uses characterized constants ($c_0=0.412$, $c_1=2.600$, $c_2=0.850$)
+- **Stopping regime** in `update_twist_control()`: coast/brake only when near zero target and low speed
+- Characterized brake models unchanged: coast $(0.951 + 0.794v)$, pure brake $(1.008 + 2.950v)$
+
+### Wall Approach Test Results
+
+First test with the new acceleration-based control architecture:
+
+```
+Speed: 1.5 m/s, Accel: 2.0 m/s², Decel: 4.0 m/s², Target: 0.20m, Safety: 0.08m
+
+Start distance:  1080 mm
+Target distance:  200 mm
+Final distance:   204 mm
+Position error:     4 mm
+Peak velocity:   1.76 m/s
+```
+
+**4mm position error** at 1.76 m/s peak speed — a significant improvement over prior control strategies.
+
+Data: `test_outputs/wall_approach_2026_02_08_16_45_23/`
 
 ## Archive References (Prior Plans)
 
