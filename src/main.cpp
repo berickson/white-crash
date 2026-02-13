@@ -1185,8 +1185,8 @@ class AccelController {
   // PI gains — now in acceleration units
   //   k_p: (m/s²) per (m/s) velocity error = 1/s
   //   k_i: (m/s²) per (m·s) integrated error = 1/s²
-  float k_p = 3.0;   // 1/s — 1 m/s error → 3 m/s² correction
-  float k_i = 1.5;   // 1/s² — steady-state error elimination
+  float k_p = 5.0;   // 1/s — increased for carpet (was 3.0)
+  float k_i = 3.0;   // 1/s² — increased so stuck wheel overcomes carpet friction faster (was 1.5)
   
   // Controller state
   float error_integral = 0.0;  // Accumulated velocity error (m·s)
@@ -1481,9 +1481,9 @@ const float track_width = 0.20;  // 20cm estimate
 
 // Angular velocity PI control gains
 // Proportional gain - immediate response to error
-const float angle_k_p = 0.5;  // Initial value, tune empirically
+const float angle_k_p = 1.0;  // Balanced: responsive but not over-correcting (was 1.5)
 // Integral gain - eliminates steady-state error
-const float angle_k_i = 2.0;  // Initial value, tune empirically
+const float angle_k_i = 3.0;  // Balanced: responsive but not over-correcting (was 4.0)
 
 // Angular velocity controller state
 float angular_error_integral = 0.0;
@@ -3166,7 +3166,7 @@ public:
   const float goal_distance = 0.06;
   float last_seen_millis = 0;
   float max_approach_velocity = 2.0;
-  float max_angular_velocity = 4.0;
+  float max_angular_velocity = 1.5;  // Reduced to prevent over-steering on approach (was 4.0)
   float target_accel = 2.0;
   float target_decel = 4.0;  // Use same decel as wall approach test
   unsigned long last_diag_log_ms = 0;
@@ -3272,10 +3272,11 @@ public:
     }
 
     // Angular velocity based on which sensor sees the can
+    // Use a fixed correction rate rather than velocity-dependent maximum
+    // to prevent aggressive over-steering during approach
     float angular = 0.0f;
     if (center_distance != min_distance) {
-      float desired_omega = fminf(max_angular_velocity, v_target / (track_width / 2.0f));
-      angular = (right_distance == min_distance) ? -desired_omega : desired_omega;
+      angular = (right_distance == min_distance) ? -max_angular_velocity : max_angular_velocity;
     }
 
     set_twist_target(v_target, angular, accel);
