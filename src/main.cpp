@@ -1223,16 +1223,30 @@ class AccelController {
     error_integral += error * dt;
     error_integral = constrain(error_integral, -max_integral, max_integral);
     
-    // Desired acceleration = trajectory accel + PI correction on velocity
-    float a_desired = accel_setpoint + k_p * error + k_i * error_integral;
+    // Scale feedforward acceleration by velocity tracking quality.
+    // When v_actual is close to v_target (ratio ≈ 1), use full feedforward.
+    // When v_actual is far from v_target (ratio ≈ 0), let PI terms dominate.
+    // This prevents the feedforward decel term from blocking forward motion
+    // when the robot is stopped but the trajectory says "decelerate".
+    float ff_scale = 1.0f;
+    if (fabs(v_target) > 0.01f) {
+      float ratio = v_actual / v_target;
+      if (ratio < 0.0f) ratio = 0.0f;
+      if (ratio > 1.0f) ratio = 1.0f;
+      ff_scale = ratio;
+    }
+    
+    // Desired acceleration = scaled trajectory accel + PI correction on velocity
+    float ff_accel = accel_setpoint * ff_scale;
+    float a_desired = ff_accel + k_p * error + k_i * error_integral;
     
     // Anti-windup: back-calculate integral if output saturates
     if (a_desired > max_accel_output) {
       a_desired = max_accel_output;
-      error_integral = (a_desired - accel_setpoint - k_p * error) / k_i;
+      error_integral = (a_desired - ff_accel - k_p * error) / k_i;
     } else if (a_desired < -max_accel_output) {
       a_desired = -max_accel_output;
-      error_integral = (a_desired - accel_setpoint - k_p * error) / k_i;
+      error_integral = (a_desired - ff_accel - k_p * error) / k_i;
     }
     
     return a_desired;
@@ -1265,8 +1279,8 @@ int left_motor_mode = 0;
 int right_motor_mode = 0;
 
 // Acceleration limits for internal ramping (Phase 3B)
-const float max_linear_accel = 1.0;  // m/s² - maximum linear acceleration
-const float max_angular_accel = 2.0; // rad/s² - maximum angular acceleration
+const float max_linear_accel = 4.0;  // m/s² - maximum linear acceleration
+const float max_angular_accel = 8.0; // rad/s² - maximum angular acceleration
 
 //////////////////////////////////
 // Brake Models (Characterized 2026-01-22, ground tests)
@@ -1831,6 +1845,26 @@ void update_twist_control() {
   control_from_velocity_and_accel(v_right_actual, a_desired_right,
                                    pwm_right, brake_right, use_brake_right);
   
+  // --- REVERSE CLAMP ---
+  // Never allow the motor to drive in the opposite direction of the velocity target.
+  // The controller (PI + feedforward) can produce negative PWM when the integral
+  // winds up during deceleration or when v_current is near zero. This causes
+  // unwanted reverse motion / oscillation. Braking is still allowed.
+  if (!use_brake_left) {
+    if (v_left_target >= 0.0f && pwm_left < 0.0f) {
+      pwm_left = 0.0f;
+    } else if (v_left_target <= 0.0f && pwm_left > 0.0f) {
+      pwm_left = 0.0f;
+    }
+  }
+  if (!use_brake_right) {
+    if (v_right_target >= 0.0f && pwm_right < 0.0f) {
+      pwm_right = 0.0f;
+    } else if (v_right_target <= 0.0f && pwm_right > 0.0f) {
+      pwm_right = 0.0f;
+    }
+  }
+
   // Debug logging (every 500ms when braking or large accel)
   static unsigned long last_ctrl_debug = 0;
   if ((use_brake_left || use_brake_right || fabs(a_desired_left) > 2.0f) && 
@@ -3064,7 +3098,7 @@ to the center of a can placed within 3 feet of the robot.
 class FindCanMode : public Task {
 public:
 
-  float rotate_radians_per_second = 3.0;
+  float rotate_radians_per_second = 2.0;
 
   FindCanMode() {
     name = "find-can";
@@ -3072,7 +3106,7 @@ public:
 
   void begin() override {
     // randomly turn left or right at every attempt
-    bool rotate_left = ((millis() % 2) == 1);
+    bool rotate_left = true; // ((millis() % 2) == 1);
 
     center_servo.writeMicroseconds(servo_center_back_us);
     left_servo.writeMicroseconds(servo_left_angled_us);
@@ -3112,9 +3146,12 @@ public:
   void end() override {
 
     disable_twist_control();
+
+    left_motor.brake(1);
+    right_motor.brake(1);
     
-    left_motor.go(0);
-    right_motor.go(0);
+//    left_motor.go(0);
+//    right_motor.go(0);
     logf("find-can mode complete");
   }
 } find_can_mode;
@@ -3134,6 +3171,7 @@ public:
   float target_decel = 4.0;  // Use same decel as wall approach test
   unsigned long last_diag_log_ms = 0;
   const unsigned long diag_log_interval_ms = 200;  // Log every 200ms
+  bool committed_to_stop = false;  // Latch: once in STOP zone, stay there
 
   GoToCanMode() {
     name = "go-to-can";
@@ -3146,6 +3184,7 @@ public:
 
     last_seen_millis = millis();
     last_diag_log_ms = 0;
+    committed_to_stop = false;
     logf("go-to-can mode begin, goal=%.3f max_v=%.1f max_w=%.1f accel=%.1f decel=%.1f",
          goal_distance, max_approach_velocity, max_angular_velocity, target_accel, target_decel);
     enable_twist_control();
@@ -3178,12 +3217,29 @@ public:
     float distance_to_target = min_distance - goal_distance;
 
     if (distance_to_target <= position_tolerance) {
-      // At target — stop with braking
+      committed_to_stop = true;
+    }
+
+    if (committed_to_stop) {
+      // Latched: once we enter STOP zone, stay here regardless of sensor noise.
+      // Never reverse — only brake or coast forward to a stop.
       float v_current = (fabs(left_speedometer.get_velocity()) + fabs(right_speedometer.get_velocity())) / 2.0f;
-      float decel_at_v = coast_model.c0 + coast_model.c1 * v_current;
-      set_twist_target(0.0f, 0.0f, -decel_at_v, 0.0f);
-      logf("go-to-can STOP: d_target=%.3f v=%.3f decel=%.2f", distance_to_target, v_current, decel_at_v);
-      if (v_current < 0.05f) {
+
+      if (distance_to_target <= 0.0f) {
+        // At or past goal — full hardware brake, bypass twist control entirely
+        disable_twist_control();
+        left_motor.brake(1.0f);
+        right_motor.brake(1.0f);
+        logf("go-to-can BRAKE: d_target=%.3f v=%.3f (past goal)", distance_to_target, v_current);
+      } else {
+        // Still approaching but committed — follow decel curve, no reverse
+        float v_decel_stop = sqrtf(2.0f * target_decel * distance_to_target);
+        float v_target_stop = fmaxf(fminf(v_decel_stop, max_approach_velocity), 0.0f);
+        set_twist_target(v_target_stop, 0.0f, -target_decel, 0.0f);
+        logf("go-to-can STOP: d_target=%.3f v=%.3f vt=%.3f", distance_to_target, v_current, v_target_stop);
+      }
+
+      if (v_current < 0.02f) {
         logf("go-to-can DONE: min_d=%.3f goal=%.3f err=%.3f", min_distance, goal_distance, distance_to_target);
         set_done();
       }
@@ -3194,57 +3250,32 @@ public:
       return;
     }
 
-    // Use velocity-dependent brake model for accurate stopping
-    // (same approach as set_approach_twist / wall approach test)
+
+    // Trapezoidal velocity profile: accel → cruise → decel
+    // Decel curve: v = sqrt(2 * target_decel * distance_to_target)
     float v_current = (fabs(left_speedometer.get_velocity()) + fabs(right_speedometer.get_velocity())) / 2.0f;
+    float v_decel = sqrtf(2.0f * target_decel * fmaxf(distance_to_target, 0.0f));
+    // Clamp: never command negative velocity (no reversing)
+    float v_target = fmaxf(fminf(v_decel, max_approach_velocity), 0.0f);
 
-    // Compute interpolated brake model for desired decel
-    float intensity = compute_brake_intensity(target_decel, max_approach_velocity);
-    if (intensity < 0.0f) intensity = 0.0f;
-    if (intensity > 1.0f) intensity = 1.0f;
-    float curve_c0 = coast_model.c0 + intensity * (pure_brake_model.c0 - coast_model.c0);
-    float curve_c1 = coast_model.c1 + intensity * (pure_brake_model.c1 - coast_model.c1);
-
-    // Compute braking curve velocity using physics-based model
-    float v_brake = velocity_for_distance(distance_to_target, curve_c0, curve_c1, max_approach_velocity);
-    float v_target = (v_brake < max_approach_velocity) ? v_brake : max_approach_velocity;
-
-    // Determine feedforward acceleration
+    // Feedforward acceleration based on profile phase
     float accel;
-    const float overshoot_threshold = 0.15f;
-
-    if (v_current > v_target + overshoot_threshold) {
-      // Significantly above target - brake hard
-      accel = -(curve_c0 + curve_c1 * fabs(v_current));
-    } else if (v_brake < max_approach_velocity) {
-      // In braking region
-      float decel_at_v = curve_c0 + curve_c1 * fabs(v_current);
-      float ratio = v_current / fmaxf(v_brake, 0.01f);
-      if (ratio > 1.0f) ratio = 1.0f;
-      accel = -decel_at_v * ratio;
+    if (v_decel < max_approach_velocity) {
+      // In decel region — follow the braking curve
+      accel = -target_decel;
     } else if (v_current < max_approach_velocity - 0.05f) {
-      // Accelerating toward max
+      // Accelerating toward cruise speed
       accel = target_accel;
     } else {
-      // Cruising at max speed
+      // At cruise speed
       accel = 0.0f;
     }
 
-    // Determine angular velocity based on which sensor sees the can.
-    // Scale angular velocity with approach speed so both wheels stay positive —
-    // prevents one wheel braking while the other drives (which causes one-wheel-only turning).
-    // Max angular limited so slowest wheel >= 0: omega_max = v_target / (track_width/2)
-    float max_omega = v_target / (track_width / 2.0f);
-    // Clamp to a reasonable maximum
-    float desired_omega = fminf(max_angular_velocity, max_omega);
-
+    // Angular velocity based on which sensor sees the can
     float angular = 0.0f;
-    if (center_distance == min_distance) {
-      angular = 0.0f;
-    } else if (right_distance == min_distance) {
-      angular = -desired_omega;
-    } else {
-      angular = desired_omega;
+    if (center_distance != min_distance) {
+      float desired_omega = fminf(max_angular_velocity, v_target / (track_width / 2.0f));
+      angular = (right_distance == min_distance) ? -desired_omega : desired_omega;
     }
 
     set_twist_target(v_target, angular, accel);
@@ -3255,9 +3286,9 @@ public:
       last_diag_log_ms = now;
       const char * sensor_str = (center_distance == min_distance) ? "C" :
                                 (right_distance == min_distance) ? "R" : "L";
-      logf("GTC: d=%.3f dt=%.3f v=%.2f vt=%.2f vb=%.2f a=%.1f w=%.2f mw=%.2f s=%s",
-           min_distance, distance_to_target, v_current, v_target, v_brake,
-           accel, angular, max_omega, sensor_str);
+      logf("GTC: d=%.3f dt=%.3f v=%.2f vt=%.2f a=%.1f w=%.2f s=%s",
+           min_distance, distance_to_target, v_current, v_target,
+           accel, angular, sensor_str);
     }
 
   }
@@ -3443,6 +3474,36 @@ class FailsafeMode : public Task {
   }
 } failsafe_mode;
 
+class StopMode : public Task {
+public:
+  StopMode() {
+    name = "stop";
+  }
+
+  void begin() override {
+    logf("stop mode begin");
+    disable_twist_control();
+    left_motor.brake(1.0f);
+    right_motor.brake(1.0f);
+  }
+
+  void execute() override {
+    float v_left = fabs(left_speedometer.get_velocity());
+    float v_right = fabs(right_speedometer.get_velocity());
+    if (v_left < 0.02f && v_right < 0.02f) {
+      left_motor.go(0);
+      right_motor.go(0);
+      logf("stop mode: wheels stopped");
+      set_done();
+    }
+  }
+
+  void end() override {
+    left_motor.go(0);
+    right_motor.go(0);
+  }
+} stop_mode;
+
 std::vector<Task *> tasks = {
     &hand_mode,
     &off_mode,
@@ -3457,7 +3518,8 @@ std::vector<Task *> tasks = {
     &calibrate_compass_mode,
     &find_can_mode,
     &go_to_can_mode,
-    &lift_can_mode
+    &lift_can_mode,
+    &stop_mode
 };
 
 std::vector<Fsm::Edge> edges = {
@@ -3473,7 +3535,9 @@ std::vector<Fsm::Edge> edges = {
     Fsm::Edge("off", "hand", "hand"),
     Fsm::Edge("hand", "sd-click", "find-can"),
     Fsm::Edge("find-can", "rc-moved", "hand"),
-    Fsm::Edge("find-can", "done", "go-to-can"),
+    Fsm::Edge("find-can", "done", "stop"),
+    Fsm::Edge("stop", "done", "go-to-can"),
+    Fsm::Edge("stop", "rc-moved", "hand"),
     Fsm::Edge("go-to-can", "rc-moved", "hand"),
     Fsm::Edge("go-to-can", "done", "lift-can"),
     Fsm::Edge("lift-can", "rc-moved", "hand"),
@@ -3506,6 +3570,10 @@ std::vector<Fsm::Edge> edges = {
     Fsm::Edge("wall-test", "done", "hand"),
     Fsm::Edge("wall-test", "rc-moved", "hand"),
     Fsm::Edge("wall-test", "hand", "hand"),  // Allow explicit return to hand
+    
+    // Stop mode - emergency full brake
+    Fsm::Edge("*", "stop", "stop"),
+    Fsm::Edge("stop", "done", "hand"),
     
     Fsm::Edge("*", "off", "off"),
 };
